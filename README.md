@@ -1,4 +1,4 @@
-# NFL fantasy steal model
+# NFL fantasy model
 
 Position rankings built from free data: **nflverse** (play-by-play, stats, rosters, injuries, combine, schedule), **Fantasy Football Calculator ADP**, and **season-long Vegas props** (CSV overlay + optional DraftKings/FTA scrape).
 
