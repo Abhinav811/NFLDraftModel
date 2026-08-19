@@ -633,7 +633,7 @@ def _write_html(
       document.body.classList.toggle("draft-on", draftOn);
       const btn = document.getElementById("draft-toggle");
       btn.classList.toggle("on", draftOn);
-      btn.textContent = draftOn ? "Draft mode" : "Start Draft";
+      btn.textContent = draftOn ? "Exit Draft" : "Start Draft";
       document.getElementById("draft-clear").hidden = !draftOn;
       updatePickCount();
       render();
