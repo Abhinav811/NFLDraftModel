@@ -1,4 +1,4 @@
-name: Refresh injury designations
+name: Refresh hosted board
 
 on:
   schedule:
@@ -18,10 +18,10 @@ jobs:
           python-version: "3.12"
       - name: Install
         run: pip install pandas pyarrow
-      - name: Refresh board designations
+      - name: Refresh board overlay
         run: python3 scripts/refresh_board.py
       - name: Commit if the board changed
         uses: stefanzweifel/git-auto-commit-action@v5
         with:
-          commit_message: "Refresh live injury designations"
+          commit_message: "Refresh hosted board overlay"
           file_pattern: docs/index.html

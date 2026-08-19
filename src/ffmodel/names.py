@@ -6,6 +6,34 @@ import unicodedata
 _SUFFIX = re.compile(r"\b(jr|sr|ii|iii|iv|v)\b\.?", re.I)
 _NON_ALNUM = re.compile(r"[^a-z0-9]+")
 
+# Sleeper / PFR / older codes → nflverse schedule team.
+_TEAM_ALIAS = {
+    "LAR": "LA",
+    "STL": "LA",
+    "JAC": "JAX",
+    "WSH": "WAS",
+    "GNB": "GB",
+    "TAM": "TB",
+    "NOR": "NO",
+    "NWE": "NE",
+    "SFO": "SF",
+    "KAN": "KC",
+    "OAK": "LV",
+    "LVR": "LV",
+    "SD": "LAC",
+    "SDG": "LAC",
+    "ARI": "ARI",
+}
+
+
+def canon_team(val) -> str:
+    if val is None:
+        return ""
+    code = str(val).strip().upper()
+    if not code or code in {"FA", "NONE", "NAN", "NULL", "NAT"}:
+        return ""
+    return _TEAM_ALIAS.get(code, code)
+
 
 def normalize_name(name: str | None) -> str:
     if not name:

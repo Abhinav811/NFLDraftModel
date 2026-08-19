@@ -139,6 +139,26 @@ def load_weekly_rosters(seasons: list[int]) -> pd.DataFrame:
     return pd.concat(frames, ignore_index=True)
 
 
+def load_player_stats_week(seasons: list[int]) -> pd.DataFrame:
+    frames = []
+    for season in seasons:
+        try:
+            path = download_release("stats_player", f"stats_player_week_{season}.parquet")
+        except FileNotFoundError:
+            continue
+        df = read_parquet(path)
+        df["season"] = season
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_ngs(kind: str) -> pd.DataFrame:
+    path = download_release("nextgen_stats", f"ngs_{kind}.parquet")
+    return read_parquet(path)
+
+
 def load_snap_counts(seasons: list[int]) -> pd.DataFrame:
     frames = []
     for season in seasons:

@@ -10,12 +10,18 @@ import pandas as pd
 
 from .config import PREDICT_SEASON, PROCESSED_DIR, ROOT
 from .ingest.live_status import attach_live_status, load_live_status
-from .features.remaining import attach_remaining_sos
+from .features.remaining import apply_ros_multipliers, attach_remaining_sos, load_remaining_schedule
 from .model import apply_board_ranks
 from .names import normalize_name
 
 
 POS_LIMITS = {"QB": 16, "RB": 36, "WR": 48, "TE": 20}
+BOARD_NOTE_FULL = (
+    "Overall rank is the 12-team pick. Round breaks mark every 12 picks. "
+    "Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. "
+    "Current team and rest-of-season points re-rank this same board as the season moves."
+)
+BOARD_NOTE_POS = "Each list is ranked within position. Switch to Full board to see overall pick / round."
 
 
 def _fmt(n, digits=1) -> str:
@@ -118,21 +124,16 @@ def _flag_why(rec) -> str:
             reasons.append(phrase)
 
     if label == "steal":
-        add(_num(rec, "breakout_window") > 0, "breakout window")
-        add(_num(rec, "injury_bounce") > 0, "injury bounce")
         add(_num(rec, "role_expand") > 0, "role expansion")
         add(_num(rec, "sophomore_leap") > 0, "sophomore leap")
-        add(_num(rec, "player_vacated_boost") >= 8, "vacated usage")
         add(_num(rec, "new_starter_vacated") >= 6, "new starter")
-        add(_num(rec, "usage_index") >= 1.25, "high usage")
         add(_num(rec, "pass_catch_rb") >= 0.08, "pass-catching RB")
         add(_num(rec, "td_luck") <= -1.0, "TD luck (under)")
     elif label == "fade":
         add(_num(rec, "workload_cliff") > 0, "workload cliff")
         add(_num(rec, "chronic_injury") > 0, "chronic injury")
-        add(_num(rec, "td_luck") >= 1.5, "TD luck (over)")
+        add(_num(rec, "td_luck") >= 2.0, "TD luck (over)")
         add(_num(rec, "overproduction") >= 0.55, "overproduction")
-        add(_num(rec, "age_alpha") <= 0.85, "aging curve")
         add(_num(rec, "eff_index") >= 1.4, "efficiency spike")
     if not reasons and label in {"steal", "fade"}:
         reasons.append("model vs ADP gap")
@@ -150,6 +151,7 @@ def _player_rows(df: pd.DataFrame) -> list[dict]:
         pos_n = getattr(rec, "listed_pos", getattr(rec, "model_rank_pos", rec.display_rank))
         ov_n = getattr(rec, "listed_ov", getattr(rec, "display_rank", 0))
         pts = getattr(rec, "ros_fp", rec.model_fp)
+        model_pts = rec.model_fp
         rows.append(
             {
                 "id": ident,
@@ -161,6 +163,7 @@ def _player_rows(df: pd.DataFrame) -> list[dict]:
                 "posRank": f"{rec.position}{int(pos_n)}",
                 "adp": None if pd.isna(rec.adp) else round(float(rec.adp), 1),
                 "fp": None if pd.isna(pts) else round(float(pts), 1),
+                "modelFp": None if pd.isna(model_pts) else round(float(model_pts), 1),
                 "vs": steal,
                 "flag": rec.steal_label if rec.steal_label in {"steal", "fade"} else "",
                 "why": _flag_why(rec),
@@ -201,10 +204,9 @@ def _steal_bullets(df: pd.DataFrame) -> str:
                 "red zone" if pd.notna(getattr(r, "z_redzone", None)) and r.z_redzone > 0.8 else "",
                 "vacated usage" if pd.notna(getattr(r, "z_vacated", None)) and r.z_vacated > 0.7 else "",
                 "TD luck fade" if pd.notna(getattr(r, "z_td_luck", None)) and r.z_td_luck < -0.7 else "",
-                "injury bounce" if getattr(r, "injury_bounce", 0) else "",
                 "role expansion" if getattr(r, "role_expand", 0) else "",
+                "sophomore leap" if getattr(r, "sophomore_leap", 0) else "",
                 "workload cliff" if getattr(r, "workload_cliff", 0) else "",
-                "breakout window" if getattr(r, "breakout_window", 0) else "",
             ]
             if x
         ) or "situation/age vs market"
@@ -683,7 +685,7 @@ def _write_html(
     </details>
 
     <h2 id="rankings-title">Full board</h2>
-    <p class="note" id="board-note">Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Points are rest-of-season (remaining SOS + games left) on the frozen model.</p>
+    <p class="note" id="board-note">{BOARD_NOTE_FULL}</p>
     <div id="full-wrap">
       <table id="table-full"><thead></thead><tbody></tbody></table>
     </div>
@@ -723,8 +725,8 @@ def _write_html(
       document.getElementById("pos-wrap").hidden = next !== "pos";
       document.getElementById("rankings-title").textContent = next === "full" ? "Full board" : "Positional rankings";
       document.getElementById("board-note").textContent = next === "full"
-        ? "Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Points are rest-of-season (remaining SOS + games left) on the frozen model."
-        : "Each list is ranked within position. Switch to Full board to see overall pick / round.";
+        ? {json.dumps(BOARD_NOTE_FULL)}
+        : {json.dumps(BOARD_NOTE_POS)};
     }}
 
     function toggleDraft() {{
@@ -907,8 +909,47 @@ def rebuild_embed_board(season: int = PREDICT_SEASON) -> str:
     return _write_html(season, ppr, half, "", "", steal_eval, embed=True)
 
 
+def _sort_overlay_rows(key: str, rows: list) -> None:
+    """Re-rank in place. Steal/fade order stays frozen."""
+    if key in {"steals", "fades"}:
+        return
+    rows.sort(key=lambda r: (-(r["fp"] if r.get("fp") is not None else -1e9), r.get("name") or ""))
+    pos_n: dict[str, int] = {}
+    for i, row in enumerate(rows, 1):
+        row["rank"] = i
+        if key == "full":
+            row["ov"] = i
+        pos = row.get("pos") or ""
+        pos_n[pos] = pos_n.get(pos, 0) + 1
+        row["posRank"] = f"{pos}{pos_n[pos]}"
+
+
+def _overlay_blob_rows(rows: list, lookup: dict, feat: pd.DataFrame) -> None:
+    for row in rows:
+        inj, tip, team = lookup.get(str(row.get("id") or ""), ("", "", ""))
+        row["inj"] = inj
+        row["injTip"] = tip
+        if team:
+            row["team"] = team
+        if row.get("modelFp") is None and row.get("fp") is not None:
+            row["modelFp"] = row["fp"]
+    if feat is None or feat.empty or not rows:
+        return
+    work = pd.DataFrame(
+        {
+            "team": [r.get("team") for r in rows],
+            "position": [r.get("pos") for r in rows],
+            "model_fp": [r.get("modelFp") for r in rows],
+        }
+    )
+    scaled = apply_ros_multipliers(work, feat)
+    for row, pts in zip(rows, scaled["ros_fp"].tolist()):
+        if pts is not None and pd.notna(pts):
+            row["fp"] = round(float(pts), 1)
+
+
 def patch_embed_injuries(season: int = PREDICT_SEASON) -> str:
-    """Update inj badges in an existing docs/index.html DATA blob."""
+    """Patch live team, designations, and rest-of-season points on the same board blob."""
     path = ROOT / "docs" / "index.html"
     html_text = path.read_text()
     marker = "const DATA = "
@@ -922,25 +963,28 @@ def patch_embed_injuries(season: int = PREDICT_SEASON) -> str:
     lookup = {}
     if not status.empty:
         lookup = {
-            str(r.player_id): (r.inj, r.inj_tip)
+            str(r.player_id): (
+                getattr(r, "inj", ""),
+                getattr(r, "inj_tip", ""),
+                getattr(r, "team", "") if "team" in status.columns else "",
+            )
             for r in status.itertuples(index=False)
         }
+    feat, _completed = load_remaining_schedule(season)
     for board in data.values():
         if not isinstance(board, dict):
             continue
-        for rows in board.values():
+        for key, rows in board.items():
             if not isinstance(rows, list):
                 continue
-            for row in rows:
-                inj, tip = lookup.get(str(row.get("id") or ""), ("", ""))
-                row["inj"] = inj
-                row["injTip"] = tip
+            _overlay_blob_rows(rows, lookup, feat)
+            _sort_overlay_rows(key, rows)
     new_json = json.dumps(data, ensure_ascii=False)
     html_text = html_text[:start] + new_json + html_text[end:]
     if as_of:
         html_text = _replace_designation_stamp(html_text, as_of)
     path.write_text(html_text)
-    print(f"  Patched designations for {len(lookup)} players ({as_of})")
+    print(f"  Patched overlay for {len(lookup)} players ({as_of})")
     return str(path)
 
 

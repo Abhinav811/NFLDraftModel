@@ -23,7 +23,18 @@ from ..ingest.nflverse import (
     load_schedules,
     load_snap_counts,
 )
-from ..names import normalize_name
+from ..names import canon_team, normalize_name
+from .edges import (
+    attach_new_oc,
+    attach_qb_change,
+    build_h2_features,
+    build_ngs_lag,
+    build_team_qb,
+    depth_snapshot,
+    load_ecr,
+    load_oc_table,
+    qb_from_depth,
+)
 from .context import (
     adp_implied_points,
     age_alpha,
@@ -100,15 +111,6 @@ def _skill_stats(stats: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
-def _depth_rank(depth: pd.DataFrame) -> pd.DataFrame:
-    if depth is None or depth.empty:
-        return pd.DataFrame(columns=["player_id", "depth_rank", "pos_abb"])
-    df = depth.sort_values("dt")
-    latest = df.groupby("gsis_id", as_index=False).tail(1)
-    latest = latest.rename(columns={"gsis_id": "player_id", "pos_rank": "depth_rank"})
-    return latest[["player_id", "depth_rank", "pos_abb", "team"]]
-
-
 def build_panel(predict_season: int = PREDICT_SEASON, use_pbp: bool = True) -> pd.DataFrame:
     seasons = list(range(FIRST_SEASON, predict_season + 1))
     lag_seasons = list(range(FIRST_SEASON, predict_season))
@@ -133,6 +135,23 @@ def build_panel(predict_season: int = PREDICT_SEASON, use_pbp: bool = True) -> p
         pbp_team = oline_index(pbp_team)
     else:
         print("Skipping PBP (fast mode).")
+
+    print("Loading H2 / NGS / ECR / OC / primary QB...")
+    h2 = build_h2_features(lag_seasons)
+    ngs = build_ngs_lag()
+    ecr = load_ecr()
+    oc = load_oc_table()
+    qb = build_team_qb(seasons)
+    try:
+        qb_cur = qb_from_depth(load_depth_charts(predict_season), predict_season)
+        if not qb_cur.empty:
+            qb = pd.concat(
+                [qb.loc[pd.to_numeric(qb["season"], errors="coerce").ne(predict_season)], qb_cur],
+                ignore_index=True,
+            )
+            print(f"  {predict_season} starting QBs from depth: {len(qb_cur)}")
+    except Exception as exc:
+        print(f"  Current-season QB from depth skipped ({exc})")
 
     print("Building context features...")
     inj = build_injury_features(injuries)
@@ -208,9 +227,14 @@ def build_panel(predict_season: int = PREDICT_SEASON, use_pbp: bool = True) -> p
 
         panel = panel.merge(phys, on="player_id", how="left", suffixes=("", "_phys"))
         try:
-            depth = _depth_rank(load_depth_charts(season))
+            depth = depth_snapshot(
+                load_depth_charts(season), season, current=(season >= predict_season)
+            )
             if not depth.empty:
-                panel = panel.merge(depth[["player_id", "depth_rank"]], on="player_id", how="left")
+                panel["player_id"] = panel["player_id"].astype(str)
+                panel = panel.merge(depth, on="player_id", how="left")
+            else:
+                panel["depth_rank"] = np.nan
         except Exception:
             panel["depth_rank"] = np.nan
 
@@ -244,6 +268,27 @@ def build_panel(predict_season: int = PREDICT_SEASON, use_pbp: bool = True) -> p
         frames.append(panel.drop_duplicates("player_id"))
 
     panel = pd.concat(frames, ignore_index=True)
+    panel["player_id"] = panel["player_id"].astype(str)
+    panel["team"] = panel["team"].map(canon_team)
+    if not h2.empty:
+        h2 = h2.copy()
+        h2["player_id"] = h2["player_id"].astype(str)
+        panel = panel.merge(h2, on=["player_id", "season"], how="left")
+    if not ngs.empty:
+        ngs = ngs.copy()
+        ngs["player_id"] = ngs["player_id"].astype(str)
+        panel = panel.merge(ngs, on=["player_id", "season"], how="left")
+    if not ecr.empty:
+        panel = panel.merge(ecr, on=["season", "name_norm", "position"], how="left")
+    if "ecr" not in panel.columns:
+        panel["ecr"] = np.nan
+    panel["ecr_minus_adp"] = pd.to_numeric(panel["ecr"], errors="coerce") - pd.to_numeric(
+        panel["adp"], errors="coerce"
+    )
+    panel = attach_qb_change(panel, qb)
+    panel = attach_new_oc(panel, oc)
+    filled = int(panel["depth_rank"].notna().sum()) if "depth_rank" in panel.columns else 0
+    print(f"  depth_rank filled {filled}/{len(panel)} ({filled / max(len(panel), 1):.0%})")
     lambdas = estimate_age_lambdas(panel.loc[panel["ppr_actual"].notna()].assign(ppr=lambda d: d["ppr_actual"]))
     panel["age_alpha"] = age_alpha(panel["age"], panel["position"], lambdas)
     panel["production_proxy"] = panel.apply(production_proxy, axis=1)

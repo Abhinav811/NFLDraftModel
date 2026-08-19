@@ -1,8 +1,7 @@
 #!/usr/bin/env python3
-"""Refresh live nflverse roster/injury designations on the GitHub Pages board.
+"""Refresh the hosted board overlay (live team, injuries, remaining SOS).
 
-Does not retrain. Rebuilds docs/index.html from saved rankings when present,
-otherwise patches the existing DATA blob.
+Same board — names move in place. Does not retrain.
 """
 from __future__ import annotations
 

@@ -25,7 +25,7 @@ Reuse a built panel:
 python3 scripts/run_pipeline.py --reuse-panel
 ```
 
-Refresh injury designations on the hosted board (no retraining):
+Refresh the hosted board overlay (live team, injuries, remaining SOS). Same board, no retrain:
 
 ```bash
 python3 scripts/refresh_board.py

@@ -463,8 +463,6 @@ def situation_proxy(row: pd.Series) -> float:
         adj *= 1.06
     if row.get("team_change"):
         adj *= 0.97
-    if row.get("injury_bounce"):
-        adj *= 1.05
     if row.get("role_expand"):
         adj *= 1.04
     if row.get("chronic_injury"):

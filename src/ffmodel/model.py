@@ -65,8 +65,6 @@ FEATURE_COLS = [
     "player_vacated_carries",
     "player_vacated_boost",
     "td_luck",
-    "rec_td_luck",
-    "rush_td_luck",
     "catch_rate_lag",
     "ypc_lag",
     "ypr_lag",
@@ -86,9 +84,6 @@ FEATURE_COLS = [
     "chronic_injury",
     "overproduction",
     "eff_index",
-    "eff_ypc_z",
-    "eff_ypr_z",
-    "eff_catch_z",
     "young_capital",
     "new_starter_vacated",
     "usage_index",
@@ -118,6 +113,17 @@ FEATURE_COLS = [
     "avg_total_shrunk",
     "avg_spread_for_shrunk",
     "new_hc",
+    "carries_h2_delta",
+    "ppr_h2_delta",
+    "ngs_intended_air_yards",
+    "ngs_ryoe_att",
+    "ngs_air_share",
+    "qb_change",
+    "wr_new_qb",
+    "new_starter_qb",
+    "ecr",
+    "ecr_minus_adp",
+    "new_oc",
 ]
 
 POS_CODE = {"QB": 0, "RB": 1, "WR": 2, "TE": 3}
@@ -339,12 +345,8 @@ def _flag_steals(df: pd.DataFrame) -> pd.Series:
     lift = df["adp_rank"] - df["model_rank"]
     edge = df["model_fp"] - df["market_fp"]
     steal_why = (
-        _col(df, "breakout_window").gt(0)
-        | _col(df, "injury_bounce").gt(0)
-        | _col(df, "role_expand").gt(0)
+        _col(df, "role_expand").gt(0)
         | _col(df, "sophomore_leap").gt(0)
-        | _col(df, "player_vacated_boost").ge(8)
-        | _col(df, "usage_index").ge(1.25)
         | _col(df, "pass_catch_rb").ge(0.08)
         | _col(df, "td_luck").le(-1.0)
         | _col(df, "new_starter_vacated").ge(6)
@@ -352,9 +354,8 @@ def _flag_steals(df: pd.DataFrame) -> pd.Series:
     fade_why = (
         _col(df, "workload_cliff").gt(0)
         | _col(df, "chronic_injury").gt(0)
-        | _col(df, "td_luck").ge(1.5)
+        | _col(df, "td_luck").ge(2.0)
         | _col(df, "overproduction").ge(0.55)
-        | _col(df, "age_alpha").le(0.85)
         | _col(df, "eff_index").ge(1.4)
     )
     steal = band & (lift >= STEAL_RANK_LIFT) & (edge >= STEAL_POINT_EDGE) & steal_why
@@ -602,8 +603,11 @@ def predict_season(panel: pd.DataFrame, season: int = PREDICT_SEASON) -> pd.Data
         "player_vacated_boost",
         "td_luck",
         "overproduction",
-        "injury_bounce",
         "role_expand",
+        "sophomore_leap",
+        "new_starter_vacated",
+        "chronic_injury",
+        "eff_index",
         "pass_catch_rb",
         "workload_cliff",
         "breakout_window",
