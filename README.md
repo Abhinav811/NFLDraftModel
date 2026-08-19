@@ -38,7 +38,7 @@ Written to `data/processed/` (gitignored) and `docs/` (GitHub Pages):
 Prose stays in the Saintistics post. The iframe is only the hosted board:
 
 ```html
-<iframe src="PAGES_URL" style="width:100%;min-height:1600px;border:0;" title="2026 fantasy board"></iframe>
+<iframe src="https://abhinav811.github.io/NFLDraftModel/" style="width:100%;min-height:1600px;border:0;" title="2026 fantasy board"></iframe>
 ```
 
 Requires a paid WordPress.com plan with hosting/plugins activated. On the free plan, link to the Pages URL instead.
