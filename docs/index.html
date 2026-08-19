@@ -66,6 +66,27 @@
     h1 { font-size: 34px; line-height: 1.15; margin: 0 0 8px; }
     .dek { color: var(--muted); font-size: 18px; margin: 0 0 28px; }
     h2 { font-size: 22px; margin: 36px 0 12px; }
+    details.fold { margin: 28px 0 8px; }
+    details.fold > summary {
+      list-style: none;
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: 650;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+    }
+    details.fold > summary::-webkit-details-marker { display: none; }
+    details.fold > summary::after {
+      content: "▾";
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1;
+      transition: transform 0.15s ease;
+    }
+    details.fold:not([open]) > summary::after { transform: rotate(-90deg); }
+    details.fold > summary:hover { color: var(--accent); }
     h3 { font-size: 16px; letter-spacing: 0.06em; text-transform: uppercase; margin: 28px 0 10px; }
     p, li { font-size: 17px; }
     .prose ol { padding-left: 22px; }
@@ -116,6 +137,8 @@
     body.embed { background: var(--card); }
     body.embed main { max-width: none; padding: 8px 12px 28px; }
     body.embed h2 { margin-top: 20px; font-size: 18px; }
+    body.embed details.fold { margin-top: 16px; }
+    body.embed details.fold > summary { font-size: 18px; }
     @media (max-width: 720px) {
       h1 { font-size: 26px; }
       .bar { flex-direction: column; align-items: flex-start; }
@@ -141,13 +164,17 @@
   </div>
   <main>
     
-    <h2>Steals</h2>
-    <p class="note" id="steal-empty" hidden>No steal flags at the current threshold.</p>
-    <table id="steals-table"><thead></thead><tbody></tbody></table>
+    <details class="fold" id="fold-steals" open>
+      <summary>Steals</summary>
+      <p class="note" id="steal-empty" hidden>No steal flags at the current threshold.</p>
+      <table id="steals-table"><thead></thead><tbody></tbody></table>
+    </details>
 
-    <h2>Fades</h2>
-    <p class="note" id="fade-empty" hidden>No fade flags at the current threshold.</p>
-    <table id="fades-table"><thead></thead><tbody></tbody></table>
+    <details class="fold" id="fold-fades" open>
+      <summary>Fades</summary>
+      <p class="note" id="fade-empty" hidden>No fade flags at the current threshold.</p>
+      <table id="fades-table"><thead></thead><tbody></tbody></table>
+    </details>
 
     <h2 id="rankings-title">Full board</h2>
     <p class="note" id="board-note">Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5).</p>
@@ -321,6 +348,15 @@
       fillFullTable(d.full);
       ["QB","RB","WR","TE"].forEach(pos => fillPosTable("table-" + pos, d[pos]));
     }
+    (function initFolds() {
+      ["fold-steals", "fold-fades"].forEach((id) => {
+        const el = document.getElementById(id);
+        if (!el) return;
+        const key = "ffmodel-fold-2026-" + id;
+        if (localStorage.getItem(key) === "0") el.removeAttribute("open");
+        el.addEventListener("toggle", () => localStorage.setItem(key, el.open ? "1" : "0"));
+      });
+    })();
     setBoard("full");
     updatePickCount();
     render();

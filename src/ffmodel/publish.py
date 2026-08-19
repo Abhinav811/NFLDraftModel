@@ -297,88 +297,28 @@ def _write_markdown(
     steal_eval: dict,
     html_path: str,
 ) -> str:
-    standouts = rankings.assign(standout=lambda d: d.filter(regex=r"^z_").abs().max(axis=1)).sort_values(
-        "standout", ascending=False
-    )
-    md = f"""# {season} Fantasy Rankings: Finding the Steals the Market Still Misprices
-
-*{date.today().isoformat()} · 12-team · model trained on {season-8}–{season-1}*
-
-**Interactive boards (PPR / Half PPR toggle):** open [`article_{season}.html`]({Path(html_path).name}).
-
-Vegas season totals are the cleanest public summary of how sharp books think a player’s counting stats will land. This model starts there — converting no-vig player props into a fantasy-point baseline (VFP) — then looks for the things a posted yardage line is structurally bad at seeing: aging, offensive line quality, coordinator pace/pass rate, chunk-play creation, red-zone roles, indoor/outdoor schedule, vacated touches, and injury residue. Where a player has no posted prop (most of the league, historically), the market proxy is Fantasy Football Calculator ADP translated into expected points.
-
-The point is not to out-project every volume total. Books are better at that than a public model. The point is to **rank players relative to the market** so the article can tell you who is a round too cheap.
-
-Use the HTML toggle to switch **Full PPR** (1 point per reception) vs **Half PPR** (0.5). The writeup does not change. Rankings subtract half a point per projected reception; Half PPR ADP is used for vs-market ranks when it is available.
-
-## How the projection is built
-
-1. **Vegas Fantasy Points (VFP).** Season-long over/unders for passing/rushing/receiving yards, TDs, and receptions are vig-stripped and scored. Juice like −120/−100 is not treated as a 50/50 median.
-2. **Tenure-weighted blend.** Rookies lean on draft capital, measurables, vacated opportunity, and scheme. Prime veterans lean on the market plus last year’s production. Aging veterans get a quadratic positional decay (QB after 30, RB after 26.5, WR after 28, TE after 28.5) with lambdas fit from history, not guessed.
-3. **Gradient boosting residual.** A position-aware HistGradientBoosting model is trained leave-one-season-out on the engineered panel. The residual is *what the ADP/VFP market misses*: TD luck, workload cliffs, injury bounce-backs, vacated usage assigned to a specific player, pass-catching RB work, and efficiency regression. Blend strength (λ) and a small rank-lift term are tuned to maximize Spearman vs actual PPR **on the same ADP-drafted players** used to score ADP.
-4. **Steal / fade flags.** ADP 18–132 (skip 1.01s and dart throws), plus at least **5 position ranks** of model lift **and** **12+ PPR** of point edge vs the ADP-implied curve. Both have to agree on sign.
-
-## Backtest
-
-The model is always trained on *prior* seasons only. Spearman below is computed on **ADP-drafted players only**, so it is a fair comparison against ADP.
-
-{bt_lines or "_Backtest table will populate after the first full run._"}
-
-Steal flags (ADP 18–132, ≥5 rank lift and ≥12 PPR edge) historically hit **{steal_eval.get('steal_hit_rate', float('nan')):.0%}** of the time (≥4 actual ranks gained vs ADP, {steal_eval.get('n_steals', 0)} flags). Fades hit **{steal_eval.get('fade_hit_rate', float('nan')):.0%}** ({steal_eval.get('n_fades', 0)} flags). Directional Spearman of predicted vs actual rank lift: **{steal_eval.get('steal_dir_spearman', float('nan')):.3f}**.
-
-## Extra stats that still beat the market
-
-These lagged stats show the strongest Spearman correlation with next-year PPR and with *beating ADP-implied points*. They are the candidates to overweight in the next iteration.
-
-{extra_lines or "_Run the pipeline to fill this._"}
-
-## {season} steals
-
-{steal_lines}
-
-## Position rankings
-
-Open the HTML article for the **full board vs positional** toggle. Overall rank on the full board is the 12-team pick (pick 25 is the start of the 3rd). Markdown tables below are positional.
-
-### Quarterback
-
-{_top_table(rankings.loc[rankings['position']=='QB'], POS_LIMITS['QB'])}
-
-### Running back
-
-{_top_table(rankings.loc[rankings['position']=='RB'], POS_LIMITS['RB'])}
-
-### Wide receiver
-
-{_top_table(rankings.loc[rankings['position']=='WR'], POS_LIMITS['WR'])}
-
-### Tight end
-
-{_top_table(rankings.loc[rankings['position']=='TE'], POS_LIMITS['TE'])}
-
-## Statistical standouts
-
-Players with the most extreme z-scores on chunk-play rate, red-zone value, vacated usage, or aging (regardless of rank):
-
-| Player | Pos | Team | Extreme edge | Model pts | ADP |
-| --- | --- | --- | --- | ---: | ---: |
-"""
-    zcols = [c for c in ["z_explosive", "z_redzone", "z_vacated", "z_td_luck", "z_usage", "z_age"] if c in standouts.columns]
-    for rec in standouts.head(15).itertuples(index=False):
-        edge = max(zcols, key=lambda c: abs(getattr(rec, c, 0) or 0)) if zcols else ""
-        md += f"| {rec.player_name} | {rec.position} | {rec.team} | {edge}={_fmt(getattr(rec, edge, 0), 2)} | {_fmt(rec.model_fp)} | {_fmt(rec.adp)} |\n"
-
-    md += """
-
-## Notes for the next iteration
-
-- Drop a fuller prop board into `data/external/season_props.csv` (player, team, market, line, over_odds, under_odds). Markets: `pass_yd`, `pass_td`, `rush_yd`, `rush_td`, `rec`, `rec_yd`, `rec_td`, `int`. Running this on a home network can also pick up DraftKings futures that datacenter IPs block.
-- Coordinator tracking is currently head-coach + team pass rate over expected. Mapping OC job changes explicitly is the highest-leverage data upgrade.
-- Historical player props are the missing piece for a true VFP backtest; ADP is the stand-in until an archive exists.
-
-*Sources: nflverse play-by-play/stats/rosters/injuries/combine (CC BY 4.0), Fantasy Football Calculator ADP, publicly posted season-long totals. Not betting advice.*
-"""
+    del rankings, html_path
+    hit = steal_eval.get("steal_hit_rate", float("nan"))
+    fade = steal_eval.get("fade_hit_rate", float("nan"))
+    dir_s = steal_eval.get("steal_dir_spearman", float("nan"))
+    template = (Path(__file__).with_name("guide_template.md")).read_text()
+    replacements = {
+        "{{SEASON}}": str(season),
+        "{{DATE}}": date.today().isoformat(),
+        "{{TRAIN_START}}": str(season - 8),
+        "{{TRAIN_END}}": str(season - 1),
+        "{{BT_LINES}}": bt_lines or "_Backtest table will populate after the first full run._",
+        "{{EXTRA_LINES}}": extra_lines or "_Run the pipeline to fill this._",
+        "{{STEAL_LINES}}": steal_lines,
+        "{{STEAL_HIT}}": f"{hit:.0%}" if pd.notna(hit) else "—",
+        "{{FADE_HIT}}": f"{fade:.0%}" if pd.notna(fade) else "—",
+        "{{N_STEALS}}": str(int(steal_eval.get("n_steals", 0) or 0)),
+        "{{N_FADES}}": str(int(steal_eval.get("n_fades", 0) or 0)),
+        "{{DIR_SPEAR}}": f"{dir_s:.3f}" if pd.notna(dir_s) else "—",
+    }
+    md = template
+    for token, value in replacements.items():
+        md = md.replace(token, value)
     return md
 
 
@@ -500,6 +440,27 @@ def _write_html(
     h1 {{ font-size: 34px; line-height: 1.15; margin: 0 0 8px; }}
     .dek {{ color: var(--muted); font-size: 18px; margin: 0 0 28px; }}
     h2 {{ font-size: 22px; margin: 36px 0 12px; }}
+    details.fold {{ margin: 28px 0 8px; }}
+    details.fold > summary {{
+      list-style: none;
+      cursor: pointer;
+      font-size: 18px;
+      font-weight: 650;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      user-select: none;
+    }}
+    details.fold > summary::-webkit-details-marker {{ display: none; }}
+    details.fold > summary::after {{
+      content: "▾";
+      font-size: 13px;
+      color: var(--muted);
+      line-height: 1;
+      transition: transform 0.15s ease;
+    }}
+    details.fold:not([open]) > summary::after {{ transform: rotate(-90deg); }}
+    details.fold > summary:hover {{ color: var(--accent); }}
     h3 {{ font-size: 16px; letter-spacing: 0.06em; text-transform: uppercase; margin: 28px 0 10px; }}
     p, li {{ font-size: 17px; }}
     .prose ol {{ padding-left: 22px; }}
@@ -550,6 +511,8 @@ def _write_html(
     body.embed {{ background: var(--card); }}
     body.embed main {{ max-width: none; padding: 8px 12px 28px; }}
     body.embed h2 {{ margin-top: 20px; font-size: 18px; }}
+    body.embed details.fold {{ margin-top: 16px; }}
+    body.embed details.fold > summary {{ font-size: 18px; }}
     @media (max-width: 720px) {{
       h1 {{ font-size: 26px; }}
       .bar {{ flex-direction: column; align-items: flex-start; }}
@@ -575,13 +538,17 @@ def _write_html(
   </div>
   <main>
     {intro}
-    <h2>Steals</h2>
-    <p class="note" id="steal-empty" hidden>No steal flags at the current threshold.</p>
-    <table id="steals-table"><thead></thead><tbody></tbody></table>
+    <details class="fold" id="fold-steals" open>
+      <summary>Steals</summary>
+      <p class="note" id="steal-empty" hidden>No steal flags at the current threshold.</p>
+      <table id="steals-table"><thead></thead><tbody></tbody></table>
+    </details>
 
-    <h2>Fades</h2>
-    <p class="note" id="fade-empty" hidden>No fade flags at the current threshold.</p>
-    <table id="fades-table"><thead></thead><tbody></tbody></table>
+    <details class="fold" id="fold-fades" open>
+      <summary>Fades</summary>
+      <p class="note" id="fade-empty" hidden>No fade flags at the current threshold.</p>
+      <table id="fades-table"><thead></thead><tbody></tbody></table>
+    </details>
 
     <h2 id="rankings-title">Full board</h2>
     <p class="note" id="board-note">Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5).</p>
@@ -755,6 +722,15 @@ def _write_html(
       fillFullTable(d.full);
       ["QB","RB","WR","TE"].forEach(pos => fillPosTable("table-" + pos, d[pos]));
     }}
+    (function initFolds() {{
+      ["fold-steals", "fold-fades"].forEach((id) => {{
+        const el = document.getElementById(id);
+        if (!el) return;
+        const key = "ffmodel-fold-2026-" + id;
+        if (localStorage.getItem(key) === "0") el.removeAttribute("open");
+        el.addEventListener("toggle", () => localStorage.setItem(key, el.open ? "1" : "0"));
+      }});
+    }})();
     setBoard("full");
     updatePickCount();
     render();
