@@ -428,6 +428,13 @@ def run_backtest(panel: pd.DataFrame) -> BacktestResult:
     by_season.to_csv(PROCESSED_DIR / "backtest_by_season.csv", index=False)
     extra.to_csv(PROCESSED_DIR / "extra_correlations.csv", index=False)
     (PROCESSED_DIR / "steal_eval.json").write_text(json.dumps(steal_eval, indent=2, default=float))
+    if not predictions.empty:
+        slim = [c for c in [
+            "season", "player_id", "player_name", "position", "team", "adp",
+            "market_fp", "model_fp", "ppr_actual", "model_rank", "adp_rank",
+            "actual_rank", "steal_label", "error", "market_error",
+        ] if c in predictions.columns]
+        predictions[slim].to_csv(PROCESSED_DIR / "backtest_predictions.csv", index=False)
     return BacktestResult(by_season, predictions, extra, steal_eval)
 
 

@@ -25,6 +25,12 @@ Reuse a built panel:
 python3 scripts/run_pipeline.py --reuse-panel
 ```
 
+Refresh injury designations on the hosted board (no retraining):
+
+```bash
+python3 scripts/refresh_board.py
+```
+
 ## Outputs
 
 Written to `data/processed/` (gitignored) and `docs/` (GitHub Pages):
@@ -63,10 +69,10 @@ DraftKings’ public JSON is geo-blocked from many servers; running the pipeline
 | OC/scheme | team pass OE, neutral pace, new HC |
 | Chunk plays | 15+ rushes, 20+ receptions × explosive EPA |
 | Red zone | inside-5 carries, inside-10 targets, end-zone targets |
-| SOS + indoor | 2026 schedule × prior-year defensive EPA, roof |
+| SOS / indoor | 2026 schedule × prior-year defensive EPA, roof; **remaining-season SOS overlay** after games are played |
 | Usage / vacated touches | target/carry share + 2026 roster returning volume |
 | Combine / draft | nflverse combine + draft capital |
-| Injury | weekly injury reports, major-keyword flag, 3-year rollup |
+| Injury | weekly injury reports, major-keyword flag, 3-year rollup; live IR/PUP/Q/O badges from Sleeper until nflverse weekly reports exist |
 | Tenure weights | rookies vs vets blend market / production / situation / athletic / aging |
 
 ## Scoring

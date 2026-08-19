@@ -278,8 +278,10 @@ def team_coaches(schedules: pd.DataFrame) -> pd.DataFrame:
     return mode
 
 
-def build_schedule_features(schedules: pd.DataFrame, defense: pd.DataFrame, season: int) -> pd.DataFrame:
+def _schedule_team_games(schedules: pd.DataFrame, season: int) -> pd.DataFrame:
     games = schedules.loc[(schedules["season"] == season) & (schedules["game_type"] == "REG")].copy()
+    played = games["home_score"].notna() | games["result"].notna()
+    games = games.assign(played=played.astype(bool))
     home = games.copy()
     home["team"] = home["home_team"]
     home["opp"] = home["away_team"]
@@ -292,8 +294,27 @@ def build_schedule_features(schedules: pd.DataFrame, defense: pd.DataFrame, seas
     away["indoor"] = away["roof"].isin(["dome", "closed"]).astype(int)
     rows = pd.concat([home, away], ignore_index=True)
     rows["total_line"] = pd.to_numeric(rows["total_line"], errors="coerce")
-    prior = defense.loc[defense["season"] == season - 1].copy()
-    rows = rows.merge(prior.add_prefix("opp_").rename(columns={"opp_team": "opp", "opp_season": "opp_season"}), on="opp", how="left")
+    return rows
+
+
+def build_schedule_features(
+    schedules: pd.DataFrame,
+    defense: pd.DataFrame,
+    season: int,
+    remaining_only: bool = False,
+) -> pd.DataFrame:
+    rows = _schedule_team_games(schedules, season)
+    full_n = rows.groupby("team")["game_id"].nunique().rename("games_sched")
+    if remaining_only:
+        rows = rows.loc[~rows["played"]].copy()
+    prior = defense.copy()
+    if "season" in prior.columns:
+        use = prior.loc[prior["season"] == season - 1]
+        if use.empty:
+            use = prior.loc[prior["season"] == prior["season"].max()]
+        prior = use
+    prior = prior.drop(columns=["season"], errors="ignore")
+    rows = rows.merge(prior.add_prefix("opp_").rename(columns={"opp_team": "opp"}), on="opp", how="left")
     feat = rows.groupby("team", as_index=False).agg(
         sos_def_rush_epa=("opp_def_rush_epa", "mean"),
         sos_def_pass_epa=("opp_def_pass_epa", "mean"),
@@ -301,8 +322,10 @@ def build_schedule_features(schedules: pd.DataFrame, defense: pd.DataFrame, seas
         pct_indoor=("indoor", "mean"),
         avg_total=("total_line", "mean"),
         avg_spread_for=("spread_for", "mean"),
-        games_sched=("game_id", "nunique"),
+        games_left=("game_id", "nunique"),
     )
+    feat = feat.merge(full_n.reset_index(), on="team", how="left")
+    feat["games_sched"] = feat["games_sched"].fillna(feat["games_left"])
     feat["season"] = season
     return feat
 

@@ -1,12 +1,18 @@
 from __future__ import annotations
 
+import json
+import time
 from pathlib import Path
 
 import pandas as pd
 import pyarrow.parquet as pq
 
-from ..config import NFLDATA_RAW, NFLVERSE_RELEASE, RAW_DIR
+from ..config import NFLDATA_RAW, NFLVERSE_RELEASE, PREDICT_SEASON, RAW_DIR
 from ..http import fetch_bytes
+
+# Tiny GitHub 404 bodies look like b"Not Found". Real parquet/json is larger.
+_MIN_CACHE_BYTES = 20
+_LIVE_MAX_AGE_HOURS = 6.0
 
 
 def _cache_path(name: str) -> Path:
@@ -14,13 +20,37 @@ def _cache_path(name: str) -> Path:
     return RAW_DIR / name
 
 
-def download_release(tag: str, filename: str) -> Path:
+def _looks_missing(path: Path) -> bool:
+    if not path.exists() or path.stat().st_size < _MIN_CACHE_BYTES:
+        return True
+    head = path.read_bytes()[:32].strip().lower()
+    return head in {b"not found", b"404"} or head.startswith(b"<!doctype") or head.startswith(b"<html")
+
+
+def download_release(tag: str, filename: str, max_age_hours: float | None = None) -> Path:
     dest = _cache_path(filename)
-    if dest.exists() and dest.stat().st_size > 0:
+    fresh = dest.exists() and not _looks_missing(dest)
+    if fresh and max_age_hours is not None:
+        age_h = (time.time() - dest.stat().st_mtime) / 3600
+        if age_h > max_age_hours:
+            fresh = False
+    if fresh:
         return dest
     url = f"{NFLVERSE_RELEASE}/{tag}/{filename}"
     fetch_bytes(url, dest=dest)
+    if _looks_missing(dest):
+        dest.unlink(missing_ok=True)
+        raise FileNotFoundError(url)
     return dest
+
+
+def load_release_timestamp(tag: str) -> str:
+    try:
+        path = download_release(tag, "timestamp.json", max_age_hours=1)
+        data = json.loads(path.read_text())
+        return str(data.get("last_updated") or "")
+    except Exception:
+        return ""
 
 
 def read_parquet(path: Path, columns: list[str] | None = None) -> pd.DataFrame:
@@ -50,7 +80,8 @@ def load_pbp(season: int, columns: list[str] | None = None) -> pd.DataFrame:
 def load_rosters(seasons: list[int]) -> pd.DataFrame:
     frames = []
     for season in seasons:
-        path = download_release("rosters", f"roster_{season}.parquet")
+        max_age = _LIVE_MAX_AGE_HOURS if season >= PREDICT_SEASON else None
+        path = download_release("rosters", f"roster_{season}.parquet", max_age_hours=max_age)
         df = read_parquet(path)
         df["season"] = season
         frames.append(df)
@@ -77,8 +108,34 @@ def load_combine() -> pd.DataFrame:
 def load_injuries(seasons: list[int]) -> pd.DataFrame:
     frames = []
     for season in seasons:
-        path = download_release("injuries", f"injuries_{season}.parquet")
+        max_age = _LIVE_MAX_AGE_HOURS if season >= PREDICT_SEASON else None
+        try:
+            path = download_release("injuries", f"injuries_{season}.parquet", max_age_hours=max_age)
+        except FileNotFoundError:
+            continue
         frames.append(read_parquet(path))
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def load_weekly_rosters(seasons: list[int]) -> pd.DataFrame:
+    frames = []
+    for season in seasons:
+        max_age = _LIVE_MAX_AGE_HOURS if season >= PREDICT_SEASON else None
+        try:
+            path = download_release(
+                "weekly_rosters",
+                f"roster_weekly_{season}.parquet",
+                max_age_hours=max_age,
+            )
+        except FileNotFoundError:
+            continue
+        df = read_parquet(path)
+        df["season"] = season
+        frames.append(df)
+    if not frames:
+        return pd.DataFrame()
     return pd.concat(frames, ignore_index=True)
 
 

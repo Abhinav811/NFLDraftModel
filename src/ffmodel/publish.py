@@ -9,6 +9,8 @@ import numpy as np
 import pandas as pd
 
 from .config import PREDICT_SEASON, PROCESSED_DIR, ROOT
+from .ingest.live_status import attach_live_status, load_live_status
+from .features.remaining import attach_remaining_sos
 from .model import apply_board_ranks
 from .names import normalize_name
 
@@ -56,6 +58,7 @@ def enrich_rankings(rankings: pd.DataFrame, panel: pd.DataFrame | None) -> pd.Da
             "eff_index",
             "age_alpha",
             "new_starter_vacated",
+            "sophomore_leap",
             "name_norm",
         ]
         if c in src.columns
@@ -97,6 +100,45 @@ def _listed(df: pd.DataFrame, n: int | None = None, by: str = "model_rank_pos", 
     return out
 
 
+def _num(rec, name: str) -> float:
+    val = getattr(rec, name, None)
+    try:
+        return float(val)
+    except (TypeError, ValueError):
+        return float("nan")
+
+
+def _flag_why(rec) -> str:
+    """Short hover phrases for steal/fade confirming features."""
+    label = getattr(rec, "steal_label", "")
+    reasons: list[str] = []
+
+    def add(ok: bool, phrase: str) -> None:
+        if ok and phrase not in reasons:
+            reasons.append(phrase)
+
+    if label == "steal":
+        add(_num(rec, "breakout_window") > 0, "breakout window")
+        add(_num(rec, "injury_bounce") > 0, "injury bounce")
+        add(_num(rec, "role_expand") > 0, "role expansion")
+        add(_num(rec, "sophomore_leap") > 0, "sophomore leap")
+        add(_num(rec, "player_vacated_boost") >= 8, "vacated usage")
+        add(_num(rec, "new_starter_vacated") >= 6, "new starter")
+        add(_num(rec, "usage_index") >= 1.25, "high usage")
+        add(_num(rec, "pass_catch_rb") >= 0.08, "pass-catching RB")
+        add(_num(rec, "td_luck") <= -1.0, "TD luck (under)")
+    elif label == "fade":
+        add(_num(rec, "workload_cliff") > 0, "workload cliff")
+        add(_num(rec, "chronic_injury") > 0, "chronic injury")
+        add(_num(rec, "td_luck") >= 1.5, "TD luck (over)")
+        add(_num(rec, "overproduction") >= 0.55, "overproduction")
+        add(_num(rec, "age_alpha") <= 0.85, "aging curve")
+        add(_num(rec, "eff_index") >= 1.4, "efficiency spike")
+    if not reasons and label in {"steal", "fade"}:
+        reasons.append("model vs ADP gap")
+    return " · ".join(reasons[:3])
+
+
 def _player_rows(df: pd.DataFrame) -> list[dict]:
     rows = []
     for rec in df.itertuples(index=False):
@@ -107,6 +149,7 @@ def _player_rows(df: pd.DataFrame) -> list[dict]:
             ident = f"{rec.player_name}|{rec.position}"
         pos_n = getattr(rec, "listed_pos", getattr(rec, "model_rank_pos", rec.display_rank))
         ov_n = getattr(rec, "listed_ov", getattr(rec, "display_rank", 0))
+        pts = getattr(rec, "ros_fp", rec.model_fp)
         rows.append(
             {
                 "id": ident,
@@ -117,9 +160,12 @@ def _player_rows(df: pd.DataFrame) -> list[dict]:
                 "pos": rec.position,
                 "posRank": f"{rec.position}{int(pos_n)}",
                 "adp": None if pd.isna(rec.adp) else round(float(rec.adp), 1),
-                "fp": None if pd.isna(rec.model_fp) else round(float(rec.model_fp), 1),
+                "fp": None if pd.isna(pts) else round(float(pts), 1),
                 "vs": steal,
                 "flag": rec.steal_label if rec.steal_label in {"steal", "fade"} else "",
+                "why": _flag_why(rec),
+                "inj": "" if not getattr(rec, "inj", "") or pd.isna(getattr(rec, "inj", None)) else str(rec.inj),
+                "injTip": "" if not getattr(rec, "inj_tip", "") or pd.isna(getattr(rec, "inj_tip", None)) else str(rec.inj_tip),
             }
         )
     return rows
@@ -184,8 +230,9 @@ def _load_half_adp(season: int) -> pd.DataFrame:
 
 def _with_listed_ranks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.loc[df["adp"].notna()].copy()
-    out["listed_pos"] = out.groupby("position")["model_fp"].rank(ascending=False, method="min")
-    out["listed_ov"] = out["model_fp"].rank(ascending=False, method="min")
+    pts = "ros_fp" if "ros_fp" in out.columns else "model_fp"
+    out["listed_pos"] = out.groupby("position")[pts].rank(ascending=False, method="min")
+    out["listed_ov"] = out[pts].rank(ascending=False, method="min")
     return out
 
 
@@ -193,7 +240,10 @@ def _board_payload(df: pd.DataFrame) -> dict:
     listed = _with_listed_ranks(df)
     steals = _listed(listed.loc[listed["steal_label"] == "steal"], by="steal_score", ascending=False)
     fades = _listed(listed.loc[listed["steal_label"] == "fade"], by="steal_score", ascending=True)
-    full = listed.sort_values(["implied_pick", "listed_ov", "player_name"], na_position="last").copy()
+    if "ros_fp" in listed.columns:
+        full = listed.sort_values(["listed_ov", "player_name"], na_position="last").copy()
+    else:
+        full = listed.sort_values(["implied_pick", "listed_ov", "player_name"], na_position="last").copy()
     full["display_rank"] = range(1, len(full) + 1)
     full["listed_ov"] = full["display_rank"]
     full = full.head(192)
@@ -331,9 +381,16 @@ def _write_html(
     steal_eval: dict,
     embed: bool = False,
 ) -> str:
-    payload = {"ppr": _board_payload(ppr), "half": _board_payload(half)}
     extra_html = _md_list_to_html(extra_md)
     backtest_html = _md_list_to_html(backtest_md)
+    status, inj_as_of = load_live_status(season)
+    if not status.empty:
+        print(f"  Live designations: {len(status)} players ({inj_as_of or 'nflverse'})")
+        ppr = attach_live_status(ppr, status)
+        half = attach_live_status(half, status)
+    ppr = attach_remaining_sos(ppr, season)
+    half = attach_remaining_sos(half, season)
+    payload = {"ppr": _board_payload(ppr), "half": _board_payload(half)}
     hit = steal_eval.get("steal_hit_rate", float("nan"))
     fade = steal_eval.get("fade_hit_rate", float("nan"))
     dir_s = steal_eval.get("steal_dir_spearman", float("nan"))
@@ -475,6 +532,7 @@ def _write_html(
     th {{ font-size: 11px; letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted); }}
     td.num, th.num {{ text-align: right; font-variant-numeric: tabular-nums; }}
     td.check, th.check {{ width: 28px; text-align: center; }}
+    td.name {{ overflow: visible; }}
     body:not(.draft-on) .check {{ display: none; }}
     tr.taken td {{ color: var(--muted); }}
     tr.taken td.name {{ text-decoration: line-through; }}
@@ -499,6 +557,80 @@ def _write_html(
     }}
     .pill.steal {{ color: var(--steal); }}
     .pill.fade {{ color: var(--fade); }}
+    .inj {{
+      display: inline-block;
+      margin-left: 6px;
+      padding: 1px 5px;
+      border-radius: 3px;
+      font: 700 9px/1.45 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      vertical-align: 1px;
+      cursor: help;
+      position: relative;
+      background: #f4e4e0;
+      color: var(--fade);
+    }}
+    .inj.q, .inj.lp {{ background: #f3ead0; color: #8a6a12; }}
+    .inj.d {{ background: #f0dcc8; color: #9b4d1c; }}
+    .inj::after {{
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 7px);
+      transform: translateX(-50%);
+      background: var(--ink);
+      color: #fff;
+      padding: 6px 8px;
+      border-radius: 4px;
+      font: 600 11px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+      text-transform: none;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      z-index: 40;
+    }}
+    .inj:hover::after, .inj:focus::after {{ opacity: 1; visibility: visible; }}
+    .info {{
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      width: 13px;
+      height: 13px;
+      margin-left: 5px;
+      border: 1px solid currentColor;
+      border-radius: 50%;
+      font: 700 9px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      cursor: help;
+      position: relative;
+      opacity: 0.75;
+      vertical-align: 1px;
+      text-transform: none;
+      letter-spacing: 0;
+    }}
+    .info:hover, .info:focus {{ opacity: 1; z-index: 50; }}
+    .info::after {{
+      content: attr(data-tip);
+      position: absolute;
+      left: 50%;
+      bottom: calc(100% + 7px);
+      transform: translateX(-50%);
+      background: var(--ink);
+      color: #fff;
+      padding: 6px 8px;
+      border-radius: 4px;
+      font: 600 11px/1.35 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      letter-spacing: 0;
+      text-transform: none;
+      white-space: nowrap;
+      pointer-events: none;
+      opacity: 0;
+      visibility: hidden;
+      z-index: 40;
+    }}
+    .info:hover::after, .info:focus::after {{ opacity: 1; visibility: visible; }}
     .pos-tag {{
       font: 600 11px/1 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
       color: var(--muted);
@@ -551,7 +683,7 @@ def _write_html(
     </details>
 
     <h2 id="rankings-title">Full board</h2>
-    <p class="note" id="board-note">Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5).</p>
+    <p class="note" id="board-note">Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Points are rest-of-season (remaining SOS + games left) on the frozen model.</p>
     <div id="full-wrap">
       <table id="table-full"><thead></thead><tbody></tbody></table>
     </div>
@@ -566,7 +698,7 @@ def _write_html(
       <table id="table-TE"><thead></thead><tbody></tbody></table>
     </div>
 
-    <footer>Sources: nflverse play-by-play/stats/rosters/injuries/combine (CC BY 4.0), Fantasy Football Calculator ADP, publicly posted season-long totals. Not betting advice.</footer>
+    <footer>Sources: nflverse play-by-play/stats/rosters/injuries/combine (CC BY 4.0), Fantasy Football Calculator ADP, publicly posted season-long totals. Designations: {html.escape(inj_as_of) if inj_as_of else "Sleeper until nflverse weekly reports"}. Not betting advice.</footer>
   </main>
   <script>
     const DATA = {data_json};
@@ -591,7 +723,7 @@ def _write_html(
       document.getElementById("pos-wrap").hidden = next !== "pos";
       document.getElementById("rankings-title").textContent = next === "full" ? "Full board" : "Positional rankings";
       document.getElementById("board-note").textContent = next === "full"
-        ? "Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5)."
+        ? "Overall rank is the 12-team pick. Round breaks mark every 12 picks. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Points are rest-of-season (remaining SOS + games left) on the frozen model."
         : "Each list is ranked within position. Switch to Full board to see overall pick / round.";
     }}
 
@@ -641,10 +773,21 @@ def _write_html(
       return `<td class="num ${{cls}}">${{t}}</td>`;
     }}
 
+    function injBadge(row) {{
+      if (!row.inj) return "";
+      const cls = String(row.inj).toLowerCase().replace(/[^a-z0-9]/g, "");
+      const tip = row.injTip || row.inj;
+      return ` <span class="inj ${{cls}}" tabindex="0" data-tip="${{escapeHtml(tip)}}" title="${{escapeHtml(tip)}}">${{escapeHtml(row.inj)}}</span>`;
+    }}
+
     function nameCell(row, showPosRank) {{
-      const pill = row.flag ? `<span class="pill ${{row.flag}}">${{row.flag}}</span>` : "";
+      let pill = "";
+      if (row.flag) {{
+        const tip = row.why ? ` <span class="info" tabindex="0" data-tip="${{escapeHtml(row.why)}}" title="${{escapeHtml(row.why)}}">i</span>` : "";
+        pill = `<span class="pill ${{row.flag}}">${{row.flag}}${{tip}}</span>`;
+      }}
       const tag = showPosRank ? `<span class="pos-tag">${{escapeHtml(row.posRank)}}</span>` : "";
-      return `<td class="name">${{escapeHtml(row.name)}}${{tag}}${{pill}}</td>`;
+      return `<td class="name">${{escapeHtml(row.name)}}${{injBadge(row)}}${{tag}}${{pill}}</td>`;
     }}
 
     function checkCell(row) {{
@@ -747,6 +890,69 @@ def _write_html(
         path = PROCESSED_DIR / f"article_{season}.html"
     path.write_text(page)
     return str(path)
+
+
+def rebuild_embed_board(season: int = PREDICT_SEASON) -> str:
+    """Rewrite docs/index.html from saved rankings without retraining."""
+    ppr_path = PROCESSED_DIR / f"rankings_{season}.csv"
+    half_path = PROCESSED_DIR / f"rankings_{season}_half.csv"
+    if not ppr_path.exists():
+        return patch_embed_injuries(season)
+    ppr = pd.read_csv(ppr_path)
+    half = pd.read_csv(half_path) if half_path.exists() else ppr.copy()
+    steal_eval = {}
+    eval_path = PROCESSED_DIR / "steal_eval.json"
+    if eval_path.exists():
+        steal_eval = json.loads(eval_path.read_text())
+    return _write_html(season, ppr, half, "", "", steal_eval, embed=True)
+
+
+def patch_embed_injuries(season: int = PREDICT_SEASON) -> str:
+    """Update inj badges in an existing docs/index.html DATA blob."""
+    path = ROOT / "docs" / "index.html"
+    html_text = path.read_text()
+    marker = "const DATA = "
+    start = html_text.find(marker)
+    if start < 0:
+        raise FileNotFoundError(f"No DATA blob in {path}")
+    start += len(marker)
+    end = html_text.find(";\n", start)
+    data = json.loads(html_text[start:end])
+    status, as_of = load_live_status(season)
+    lookup = {}
+    if not status.empty:
+        lookup = {
+            str(r.player_id): (r.inj, r.inj_tip)
+            for r in status.itertuples(index=False)
+        }
+    for board in data.values():
+        if not isinstance(board, dict):
+            continue
+        for rows in board.values():
+            if not isinstance(rows, list):
+                continue
+            for row in rows:
+                inj, tip = lookup.get(str(row.get("id") or ""), ("", ""))
+                row["inj"] = inj
+                row["injTip"] = tip
+    new_json = json.dumps(data, ensure_ascii=False)
+    html_text = html_text[:start] + new_json + html_text[end:]
+    if as_of:
+        html_text = _replace_designation_stamp(html_text, as_of)
+    path.write_text(html_text)
+    print(f"  Patched designations for {len(lookup)} players ({as_of})")
+    return str(path)
+
+
+def _replace_designation_stamp(html_text: str, as_of: str) -> str:
+    start = html_text.find("Designations: ")
+    if start < 0:
+        return html_text
+    end_rel = html_text[start:].find(". Not betting advice.")
+    if end_rel < 0:
+        return html_text
+    replacement = f"Designations: {html.escape(as_of)}"
+    return html_text[:start] + replacement + html_text[start + end_rel :]
 
 
 def _md_list_to_html(md: str) -> str:

@@ -1,0 +1,27 @@
+name: Refresh injury designations
+
+on:
+  schedule:
+    - cron: "0 14 * * *"
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  refresh:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Install
+        run: pip install pandas pyarrow
+      - name: Refresh board designations
+        run: python3 scripts/refresh_board.py
+      - name: Commit if the board changed
+        uses: stefanzweifel/git-auto-commit-action@v5
+        with:
+          commit_message: "Refresh live injury designations"
+          file_pattern: docs/index.html

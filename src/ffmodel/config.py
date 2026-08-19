@@ -13,6 +13,8 @@ NFLDATA_RAW = "https://raw.githubusercontent.com/nflverse/nfldata/master/data"
 FFC_ADP_URL = "https://fantasyfootballcalculator.com/api/v1/adp/ppr"
 FTA_PROPS_URL = "https://fantasyteamadvice.com/nfl/season-long-props"
 DK_NFL_EVENTGROUP = "https://sportsbook.draftkings.com/sites/US-SB/api/v5/eventgroups/88808?format=json"
+SLEEPER_PLAYERS_URL = "https://api.sleeper.app/v1/players/nfl"
+SLEEPER_MAX_AGE_HOURS = 20.0
 
 # Feature years include a lag year before the first training target.
 FIRST_SEASON = 2018
