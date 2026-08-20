@@ -145,7 +145,8 @@ def _flag_why(rec) -> str:
 def _player_rows(df: pd.DataFrame) -> list[dict]:
     rows = []
     for rec in df.itertuples(index=False):
-        steal = 0 if pd.isna(rec.steal_score) else int(rec.steal_score)
+        vs_raw = getattr(rec, "vs_adp", rec.steal_score)
+        vs = 0 if pd.isna(vs_raw) else int(vs_raw)
         pid = getattr(rec, "player_id", None)
         ident = "" if pid is None or pd.isna(pid) else str(pid)
         if not ident:
@@ -166,7 +167,7 @@ def _player_rows(df: pd.DataFrame) -> list[dict]:
                 "adp": None if pd.isna(rec.adp) else round(float(rec.adp), 1),
                 "fp": None if pd.isna(pts) else round(float(pts), 1),
                 "modelFp": None if pd.isna(model_pts) else round(float(model_pts), 1),
-                "vs": steal,
+                "vs": vs,
                 "flag": rec.steal_label if rec.steal_label in {"steal", "fade"} else "",
                 "why": _flag_why(rec),
                 "inj": "" if not getattr(rec, "inj", "") or pd.isna(getattr(rec, "inj", None)) else str(rec.inj),
@@ -249,6 +250,7 @@ def _board_payload(df: pd.DataFrame) -> dict:
     full["display_rank"] = range(1, len(full) + 1)
     full["listed_ov"] = full["display_rank"]
     full = full.head(192)
+    full["vs_adp"] = full["adp"].rank(method="min") - full["display_rank"]
     return {
         "steals": _player_rows(steals),
         "fades": _player_rows(fades),
@@ -947,6 +949,24 @@ def _sort_overlay_rows(key: str, rows: list, repl: dict[str, float] | None = Non
         pos = row.get("pos") or ""
         pos_n[pos] = pos_n.get(pos, 0) + 1
         row["posRank"] = f"{pos}{pos_n[pos]}"
+    if key == "full":
+        _fill_overall_vs(rows)
+
+
+def _fill_overall_vs(rows: list) -> None:
+    """vs ADP on the full board = overall ADP rank − overall pick."""
+    groups: dict[float, list[int]] = {}
+    for i, row in enumerate(rows):
+        adp = row.get("adp")
+        key = float(adp) if adp is not None else float("inf")
+        groups.setdefault(key, []).append(i)
+    rank = 1
+    for adp in sorted(groups):
+        idxs = groups[adp]
+        for i in idxs:
+            pick = int(rows[i].get("ov") or rows[i].get("rank") or 0)
+            rows[i]["vs"] = int(rank - pick)
+        rank += len(idxs)
 
 
 def _overlay_blob_rows(rows: list, lookup: dict, feat: pd.DataFrame) -> None:
