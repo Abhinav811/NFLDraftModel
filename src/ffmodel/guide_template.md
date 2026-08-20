@@ -16,7 +16,7 @@ The model is not trying to beat Vegas on yardage. Books are better at volume. It
 
 1. Open the [hosted table](https://abhinav811.github.io/NFLDraftModel/) in a new tab.
 2. Full PPR vs Half PPR re-ranks the same engine. Half PPR is full PPR minus ½ × projected receptions — not a second model.
-3. Full board is 12-team **draft value** (projected PPR minus a replacement starter: QB12, RB28, WR36, TE12), with round headers. That is why elite RBs go in the first round and QBs cluster nearer ADP in the middle rounds. Positional is QB/RB/WR/TE lists ranked on points.
+3. Full board is 12-team **draft value** (projected PPR minus a replacement starter: QB12, RB30, WR30, TE12 — 2 RB, 2 WR, 1 FLEX split evenly), with round headers. That is why elite RBs go in the first round and QBs cluster nearer ADP in the middle rounds. Positional is QB/RB/WR/TE lists ranked on points.
 4. Start Draft / Exit Draft stores crossed-off names in this browser. Clear picks wipes them.
 5. A name can sit a couple of ranks off ADP without being flagged. Flags require a real gap *and* a confirming reason (section 7).
 

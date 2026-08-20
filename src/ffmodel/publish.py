@@ -18,7 +18,7 @@ from .names import normalize_name
 POS_LIMITS = {"QB": 16, "RB": 36, "WR": 48, "TE": 20}
 BOARD_NOTE_FULL = (
     "Overall pick is 12-team draft value (points over a replacement starter: "
-    "QB12, RB28, WR36, TE12), not raw PPR. That is why elite RBs go first and "
+    "QB12, RB30, WR30, TE12 — 2 RB, 2 WR, 1 FLEX split evenly), not raw PPR. That is why elite RBs go first and "
     "QBs sit in the middle rounds. Positional rank stays on the name (QB5). "
     "IR / PUP / Q / O tags are live. Current team and rest-of-season points "
     "re-rank this same board as the season moves."
@@ -412,7 +412,7 @@ def _write_html(
     <div class="prose">
       <p>Vegas season totals are the cleanest public summary of how sharp books think a player’s counting stats will land. This model starts there — converting no-vig player props into a fantasy-point baseline (VFP) — then looks for the things a posted yardage line is structurally bad at seeing: aging, offensive line quality, coordinator pace/pass rate, chunk-play creation, red-zone roles, indoor/outdoor schedule, vacated touches, and injury residue. Where a player has no posted prop, the market proxy is Fantasy Football Calculator ADP translated into expected points.</p>
       <p>The point is not to out-project every volume total. Books are better at that than a public model. The point is to <strong>rank players relative to the market</strong> so you can see who is a round too cheap.</p>
-      <p class="note">Half PPR subtracts 0.5 points per projected reception from the Full PPR projection and, when available, uses Half PPR ADP for the vs-market column. Pass-catching backs and slot receivers move down relative to rushing volume and touchdown-driven work. The full board is 12-team <strong>draft value</strong> — projected points minus a replacement starter (QB12, RB28, WR36, TE12) — not raw PPR. Pick 1 is 1.01; QBs therefore land nearer ADP instead of filling the first round. Positional lists still rank on points (QB5, RB12).</p>
+      <p class="note">Half PPR subtracts 0.5 points per projected reception from the Full PPR projection and, when available, uses Half PPR ADP for the vs-market column. Pass-catching backs and slot receivers move down relative to rushing volume and touchdown-driven work. The full board is 12-team <strong>draft value</strong> — projected points minus a replacement starter (QB12, RB30, WR30, TE12 — 2 RB, 2 WR, 1 FLEX split evenly) — not raw PPR. Pick 1 is 1.01; QBs therefore land nearer ADP instead of filling the first round. Positional lists still rank on points (QB5, RB12).</p>
 
       <h2>How the projection is built</h2>
       <ol>
