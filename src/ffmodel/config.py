@@ -46,6 +46,9 @@ RZ_WEIGHTS = {"inside5_carries": 1.4, "inside10_targets": 1.0, "ez_targets": 1.6
 
 # 12-team, full-PPR draft windows.
 ROUND_SIZE = 12
+# Last startable skill slot for VORP on the overall board (1QB, 2RB, 3WR, 1TE, 1 FLEX).
+# Flex is mostly WR/RB in PPR; RB28 = 24 starters + ~4 flex backs.
+REPLACEMENT_RANK = {"QB": 12, "RB": 28, "WR": 36, "TE": 12}
 EARLY_ROUNDS = (1, 4)
 MID_ROUNDS = (5, 8)
 LATE_ROUNDS = (9, 14)

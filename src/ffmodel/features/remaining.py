@@ -2,7 +2,8 @@
 
 A live team change uses the new club's leftover opponents. Games already
 played drop off. The hosted table is still the one big board — ranks move
-in place; there is no separate trade view.
+in place; there is no separate trade view. Overall order is VORP
+(points over a 12-team replacement starter), not raw remaining PPR.
 
 ros_fp = model_fp
         × (games left / scheduled)

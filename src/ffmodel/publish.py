@@ -8,18 +8,20 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from .config import PREDICT_SEASON, PROCESSED_DIR, ROOT
+from .config import PREDICT_SEASON, PROCESSED_DIR, REPLACEMENT_RANK, ROOT
 from .ingest.live_status import attach_live_status, load_live_status
 from .features.remaining import apply_ros_multipliers, attach_remaining_sos, load_remaining_schedule
-from .model import apply_board_ranks
+from .model import apply_board_ranks, attach_draft_value
 from .names import normalize_name
 
 
 POS_LIMITS = {"QB": 16, "RB": 36, "WR": 48, "TE": 20}
 BOARD_NOTE_FULL = (
-    "Overall rank is the 12-team pick. Round breaks mark every 12 picks. "
-    "Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. "
-    "Current team and rest-of-season points re-rank this same board as the season moves."
+    "Overall pick is 12-team draft value (points over a replacement starter: "
+    "QB12, RB28, WR36, TE12), not raw PPR. That is why elite RBs go first and "
+    "QBs sit in the middle rounds. Positional rank stays on the name (QB5). "
+    "IR / PUP / Q / O tags are live. Current team and rest-of-season points "
+    "re-rank this same board as the season moves."
 )
 BOARD_NOTE_POS = "Each list is ranked within position. Switch to Full board to see overall pick / round."
 
@@ -233,8 +235,9 @@ def _load_half_adp(season: int) -> pd.DataFrame:
 def _with_listed_ranks(df: pd.DataFrame) -> pd.DataFrame:
     out = df.loc[df["adp"].notna()].copy()
     pts = "ros_fp" if "ros_fp" in out.columns else "model_fp"
+    out = attach_draft_value(out, pts_col=pts)
     out["listed_pos"] = out.groupby("position")[pts].rank(ascending=False, method="min")
-    out["listed_ov"] = out[pts].rank(ascending=False, method="min")
+    out["listed_ov"] = out["vorp"].rank(ascending=False, method="min")
     return out
 
 
@@ -242,10 +245,7 @@ def _board_payload(df: pd.DataFrame) -> dict:
     listed = _with_listed_ranks(df)
     steals = _listed(listed.loc[listed["steal_label"] == "steal"], by="steal_score", ascending=False)
     fades = _listed(listed.loc[listed["steal_label"] == "fade"], by="steal_score", ascending=True)
-    if "ros_fp" in listed.columns:
-        full = listed.sort_values(["listed_ov", "player_name"], na_position="last").copy()
-    else:
-        full = listed.sort_values(["implied_pick", "listed_ov", "player_name"], na_position="last").copy()
+    full = listed.sort_values(["listed_ov", "player_name"], na_position="last").copy()
     full["display_rank"] = range(1, len(full) + 1)
     full["listed_ov"] = full["display_rank"]
     full = full.head(192)
@@ -410,7 +410,7 @@ def _write_html(
     <div class="prose">
       <p>Vegas season totals are the cleanest public summary of how sharp books think a player’s counting stats will land. This model starts there — converting no-vig player props into a fantasy-point baseline (VFP) — then looks for the things a posted yardage line is structurally bad at seeing: aging, offensive line quality, coordinator pace/pass rate, chunk-play creation, red-zone roles, indoor/outdoor schedule, vacated touches, and injury residue. Where a player has no posted prop, the market proxy is Fantasy Football Calculator ADP translated into expected points.</p>
       <p>The point is not to out-project every volume total. Books are better at that than a public model. The point is to <strong>rank players relative to the market</strong> so you can see who is a round too cheap.</p>
-      <p class="note">Half PPR subtracts 0.5 points per projected reception from the Full PPR projection and, when available, uses Half PPR ADP for the vs-market column. Pass-catching backs and slot receivers move down relative to rushing volume and touchdown-driven work. The full board is overall model rank among drafted-pool players — pick 1 is 1.01, pick 25 is the start of the 3rd in a 12-team league — and still shows positional rank (QB5, RB12).</p>
+      <p class="note">Half PPR subtracts 0.5 points per projected reception from the Full PPR projection and, when available, uses Half PPR ADP for the vs-market column. Pass-catching backs and slot receivers move down relative to rushing volume and touchdown-driven work. The full board is 12-team <strong>draft value</strong> — projected points minus a replacement starter (QB12, RB28, WR36, TE12) — not raw PPR. Pick 1 is 1.01; QBs therefore land nearer ADP instead of filling the first round. Positional lists still rank on points (QB5, RB12).</p>
 
       <h2>How the projection is built</h2>
       <ol>
@@ -909,11 +909,36 @@ def rebuild_embed_board(season: int = PREDICT_SEASON) -> str:
     return _write_html(season, ppr, half, "", "", steal_eval, embed=True)
 
 
-def _sort_overlay_rows(key: str, rows: list) -> None:
-    """Re-rank in place. Steal/fade order stays frozen."""
+def _position_replacement(rows: list) -> dict[str, float]:
+    by_pos: dict[str, list[float]] = {}
+    for row in rows:
+        fp = row.get("fp")
+        if fp is None:
+            continue
+        by_pos.setdefault(str(row.get("pos") or ""), []).append(float(fp))
+    repl: dict[str, float] = {}
+    for pos, n in REPLACEMENT_RANK.items():
+        vals = sorted(by_pos.get(pos, []), reverse=True)
+        if vals:
+            repl[pos] = vals[min(int(n) - 1, len(vals) - 1)]
+        else:
+            repl[pos] = 0.0
+    return repl
+
+
+def _sort_overlay_rows(key: str, rows: list, repl: dict[str, float] | None = None) -> None:
+    """Re-rank in place. Steal/fade order stays frozen. Full board sorts on VORP."""
     if key in {"steals", "fades"}:
         return
-    rows.sort(key=lambda r: (-(r["fp"] if r.get("fp") is not None else -1e9), r.get("name") or ""))
+    if key == "full" and repl is not None:
+        rows.sort(
+            key=lambda r: (
+                -((r["fp"] if r.get("fp") is not None else 0) - repl.get(str(r.get("pos") or ""), 0)),
+                r.get("name") or "",
+            )
+        )
+    else:
+        rows.sort(key=lambda r: (-(r["fp"] if r.get("fp") is not None else -1e9), r.get("name") or ""))
     pos_n: dict[str, int] = {}
     for i, row in enumerate(rows, 1):
         row["rank"] = i
@@ -978,7 +1003,11 @@ def patch_embed_injuries(season: int = PREDICT_SEASON) -> str:
             if not isinstance(rows, list):
                 continue
             _overlay_blob_rows(rows, lookup, feat)
-            _sort_overlay_rows(key, rows)
+        full_rows = board.get("full") if isinstance(board.get("full"), list) else []
+        repl = _position_replacement(full_rows)
+        for key, rows in board.items():
+            if isinstance(rows, list):
+                _sort_overlay_rows(key, rows, repl)
     new_json = json.dumps(data, ensure_ascii=False)
     html_text = html_text[:start] + new_json + html_text[end:]
     if as_of:

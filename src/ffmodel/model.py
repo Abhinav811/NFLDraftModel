@@ -15,6 +15,7 @@ from .config import (
     MIN_TRAIN_PPR,
     PREDICT_SEASON,
     PROCESSED_DIR,
+    REPLACEMENT_RANK,
     ROUND_SIZE,
     STEAL_ADP_MAX,
     STEAL_ADP_MIN,
@@ -524,12 +525,37 @@ def _ordinal(n: int) -> str:
     return f"{n}{suf}"
 
 
+def attach_draft_value(df: pd.DataFrame, pts_col: str | None = None) -> pd.DataFrame:
+    """Points over a 12-team replacement starter. Overall board sorts on this, not raw PPR."""
+    out = df.copy()
+    col = pts_col or ("ros_fp" if "ros_fp" in out.columns else "model_fp")
+    if col not in out.columns:
+        out["replacement_fp"] = np.nan
+        out["vorp"] = np.nan
+        return out
+    pts = pd.to_numeric(out[col], errors="coerce")
+    pool = pts.where(out["adp"].notna(), np.nan) if "adp" in out.columns else pts
+    out["replacement_fp"] = np.nan
+    out["vorp"] = np.nan
+    for pos, n in REPLACEMENT_RANK.items():
+        mask = out["position"].eq(pos)
+        ordered = pool.loc[mask].dropna().sort_values(ascending=False)
+        if ordered.empty:
+            ordered = pts.loc[mask].dropna().sort_values(ascending=False)
+        if ordered.empty:
+            continue
+        repl = float(ordered.iloc[min(int(n) - 1, len(ordered) - 1)])
+        out.loc[mask, "replacement_fp"] = repl
+        out.loc[mask, "vorp"] = pts.loc[mask] - repl
+    return out
+
+
 def apply_board_ranks(df: pd.DataFrame) -> pd.DataFrame:
     """Recompute position ranks, 12-team round slots, and steal/fade flags."""
-    out = df.copy()
+    out = attach_draft_value(df)
     out["model_rank_pos"] = out.groupby("position")["model_fp"].rank(ascending=False, method="min")
     out["adp_rank_pos"] = out.groupby("position")["adp"].rank(method="min")
-    out["model_rank_ov"] = out["model_fp"].rank(ascending=False, method="min")
+    out["model_rank_ov"] = out["vorp"].rank(ascending=False, method="min") if "vorp" in out.columns else out["model_fp"].rank(ascending=False, method="min")
     out["implied_pick"] = np.nan
     for _, grp in out.groupby("position"):
         adp_sorted = grp["adp"].dropna().sort_values().to_numpy()
@@ -593,6 +619,8 @@ def predict_season(panel: pd.DataFrame, season: int = PREDICT_SEASON) -> pd.Data
         "model_rank_pos",
         "adp_rank_pos",
         "model_rank_ov",
+        "vorp",
+        "replacement_fp",
         "implied_pick",
         "round_value",
         "adp_round_value",
