@@ -1,0 +1,270 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<title>Backend briefing — 2026 fantasy ranking model</title>
+<style>
+  @page { size: letter; margin: 0.85in 0.9in 1in; }
+  body { font: 11pt/1.45 "Iowan Old Style", Palatino, Georgia, serif; color: #1a1a1a; }
+  h1 { font-size: 22pt; line-height: 1.2; margin: 0 0 6pt; }
+  h2 { font-size: 14pt; margin: 22pt 0 8pt; border-bottom: 1px solid #d9d2c5; padding-bottom: 3pt; }
+  h3 { font-size: 12pt; margin: 14pt 0 6pt; }
+  p, li { margin: 0 0 8pt; }
+  .dek { color: #5c574e; font-size: 10.5pt; margin-bottom: 16pt; }
+  .box { background: #f7f4ee; border: 1px solid #d9d2c5; padding: 8pt 10pt; margin: 10pt 0 14pt; }
+  .warn { background: #f8eee8; border-color: #e0c4b8; }
+  table { border-collapse: collapse; width: 100%; font-size: 9.5pt; margin: 8pt 0 14pt; }
+  th, td { border: 1px solid #d9d2c5; padding: 4pt 6pt; text-align: left; vertical-align: top; }
+  th { background: #f7f4ee; }
+  td.n { text-align: right; font-variant-numeric: tabular-nums; }
+  code, pre { font: 8.5pt/1.35 Menlo, Consolas, monospace; }
+  pre { background: #f7f4ee; padding: 8pt; overflow: hidden; white-space: pre-wrap; }
+  .muted { color: #5c574e; font-size: 9.5pt; }
+  ul { margin: 0 0 10pt 18pt; }
+  .keep { page-break-inside: avoid; }
+</style>
+</head>
+<body>
+
+<h1>Writer’s backend briefing</h1>
+<p class="dek">Internal notes for a casual-but-accurate 2026 article. Not copy. Numbers below are from the live code and the last walk-forward (trained through 2025, board for 2026). Date of this dump: 20 Aug 2026.</p>
+
+<div class="box">
+<p><strong>What you are writing about:</strong> a 12-team full-PPR ranking model whose job is not “nail every player’s point total.” It is “rank drafted players relative to ADP / Vegas, and paint a name green or red only when the gap is large and there is a football reason.”</p>
+<p><strong>Live board:</strong> https://abhinav811.github.io/NFLDraftModel/ · GitHub: Abhinav811/NFLDraftModel · Pages from <code>main</code> / <code>docs</code>.</p>
+</div>
+
+<div class="box warn">
+<p><strong>Do not claim in the article</strong></p>
+<ul>
+<li>That this is a betting model, or that VFP is +EV on props.</li>
+<li>That point MAE (~55 PPR) is “accurate crystal ball” — that error is normal for season-long fantasy; the claim is ranking lift vs ADP.</li>
+<li>That the model beats ADP every year. 2021 was a tiny loss (−0.005 Spearman); 2024 was a tie (+0.001). Mean lift ~+0.019.</li>
+<li>That every ADP disagreement is a steal. Close-to-ADP names are a coin flip. Flags need ±5 <em>position</em> ranks <em>and</em> ±12 PPR <em>and</em> a confirmer.</li>
+<li>That Half PPR is a second trained model. It is full PPR minus 0.5 × projected receptions.</li>
+<li>That midseason is a separate product. Same board; live team + remaining SOS move names in place. Steal/fade flags stay frozen.</li>
+</ul>
+</div>
+
+<h2>1. One-sentence architecture</h2>
+<p>For each skill player (QB/RB/WR/TE) in season <em>t</em>, build a market number <em>m</em> (Vegas fantasy points if a prop exists, else an ADP-implied points curve), mix in a tenure-weighted prior (production, situation, physical, aging), then add a small gradient-boosted residual that tries to predict how last year’s <em>m</em> was wrong. Tune how much residual to trust (λ) on ranking correlation, not on how many names turn green.</p>
+<pre>ŷ  =  market_or_blend  +  λ_tenure · residual  +  k · rank_lift
+     then a little extra pull toward the prior for rookies without a prop</pre>
+<p>Walk-forward: train only on seasons &lt; t, score t. Never use 2026 outcomes (they don’t exist). Historical <em>m</em> is ADP because there is no archive of player-level season props.</p>
+
+<h2>2. Pipeline (what actually runs)</h2>
+<ol>
+<li><code>python3 scripts/run_pipeline.py</code> — download nflverse + ADP + props, build <code>data/processed/player_panel.parquet</code> (not published), walk-forward backtest, fit 2026, write rankings CSVs + methods HTML + rebuild <code>docs/index.html</code>.</li>
+<li><code>python3 scripts/refresh_board.py</code> — no retrain. Re-rank the saved 2026 CSV with live Sleeper injuries/teams and remaining SOS. Used by GitHub Action daily 14:00 UTC.</li>
+<li>Push <code>docs/index.html</code> (and figures) to <code>main</code> for Pages.</li>
+</ol>
+<p>Processed parquet is gitignored on purpose. The hosted page is a static HTML blob of ~192 ADP-drafted names.</p>
+
+<h2>3. Where every number comes from</h2>
+<table>
+<tr><th>Layer</th><th>Source</th><th>How it is used</th></tr>
+<tr><td>Play-by-play</td><td>nflverse <code>play_by_play_YYYY.parquet</code> (CC BY 4.0)</td><td>Red zone, chunk plays, O-line index, PROE/pace, team SOS, primary passer</td></tr>
+<tr><td>Season stats</td><td>nflverse <code>stats_player_reg_YYYY</code></td><td>Lagged PPR, usage, EPA, WOPR; realized <em>y</em> for backtests</td></tr>
+<tr><td>Weekly stats</td><td>nflverse <code>stats_player_week_YYYY</code></td><td>H2 vs H1 carry and PPR deltas (lagged +1 season)</td></tr>
+<tr><td>NGS</td><td>nflverse <code>ngs_{passing,rushing,receiving}.parquet</code></td><td>QB intended air yards; RB RYOE/att; WR air-share (lagged)</td></tr>
+<tr><td>Rosters / players</td><td>nflverse rosters + players</td><td>Team, position (FB/HB→RB), age, years_exp</td></tr>
+<tr><td>Depth charts</td><td>nflverse depth_charts (weekly schema 2019–24; ESPN-style dt/pos_rank 2025–26)</td><td>Week-1 / pre-kickoff depth_rank. ADP-pool fill ~97% after the join fix</td></tr>
+<tr><td>Injuries / snaps</td><td>nflverse injuries, snap_counts</td><td>Missed weeks, availability, snap %, chronic 3-yr rollup</td></tr>
+<tr><td>Combine / draft</td><td>nflverse combine + draft_picks</td><td>Physical prior for young players; undrafted pick = 250</td></tr>
+<tr><td>Schedule</td><td>nflverse games</td><td>This year’s opponents → SOS from last year’s def EPA; indoor %; implied totals/spreads</td></tr>
+<tr><td>ADP</td><td>Fantasy Football Calculator API, 12-team PPR (half-PPR when toggling)</td><td>Market proxy historically; steal band; sample weights; “vs ADP”</td></tr>
+<tr><td>Season props / VFP</td><td>User wide CSV <code>data/external/season_long_props_wide.csv</code> (FTA scrape + DraftKings often blocked)</td><td>2026 market <em>m</em> when ≥1 market posts</td></tr>
+<tr><td>ECR</td><td>DynastyProcess FantasyPros archive (Aug–Sep redraft)</td><td>Tree feature <code>ecr</code>, <code>ecr_minus_adp</code></td></tr>
+<tr><td>OC map</td><td>Wikipedia team-season staff + current OC list (PFR is Cloudflare-blocked)</td><td><code>new_oc</code> binary; 2026 has 31/32 teams; history is partial</td></tr>
+<tr><td>Live injuries / team</td><td>Sleeper <code>/v1/players/nfl</code> until nflverse weekly reports exist; then nflverse injuries</td><td>Q / O / IR badges; club changes (LAR→LA etc.)</td></tr>
+</table>
+<p class="muted">Names are normalized (strip Jr/III, accents). Teams aliased (LAR→LA, JAC→JAX, WSH→WAS, …). Skill positions only: QB, RB, WR, TE.</p>
+
+<h2>4. Scoring (what “points” means)</h2>
+<pre>pass yard  0.04     rush/rec yard  0.10     reception  1.00
+pass TD    4.00     rush/rec TD    6.00     INT / fum  −2.00</pre>
+<p>That is full PPR. Half PPR on the board is the same ŷ minus ½ × projected receptions (prop receptions if present, else last year’s, else a position catch-rate × targets). Not a re-fit.</p>
+<p>Games: 16 through 2020, 17 from 2021 on (including 2026).</p>
+
+<h2>5. The market layer — what “ADP” and “Vegas” actually are</h2>
+<h3>5.1 Vegas Fantasy Points (VFP) — 2026 only</h3>
+<p>Posted over/under <em>L</em> is treated as a median. American odds → implied p_over / p_under, vig-stripped to a fair over probability, then a damped shift of the line:</p>
+<pre>p = |o|/(|o|+100) if o&lt;0 else 100/(o+100)
+p_fair = p_over / (p_over + p_under)
+z = clip( Φ⁻¹(p_fair), −1.5, 1.5 )
+E[X] = L + 0.35 · σ_market · z
+VFP = Σ E[X_k] · scoring_k</pre>
+<p>σ scales (so juice cannot yank a total several σ): pass yd 450, rush yd 180, rec yd 160, rec 12, pass TD 4.5, rush TD 2.8, rec TD 2.4, INT 2.2, fum 1.2. Used as <em>m</em> only if <code>vfp_markets ≥ 1</code>.</p>
+<p><strong>Casual angle:</strong> books are better at volume than a public model. The model is not trying to out-Vegas passing yards. It is trying to notice aging, vacated touches assigned to a <em>person</em>, TD luck vs role, cliffs, etc.</p>
+
+<h3>5.2 ADP-implied points (historical <em>m</em>, and 2026 fallback)</h3>
+<p>By position, OLS: <code>m_ADP = β0 + β1 · log(ADP)</code> fit on historical (ADP, actual PPR). Two WRs five picks apart can be 40 PPR apart. This is a <em>points</em> market, not “they’re next to each other on a cheat sheet.”</p>
+<p>FFC 12-team PPR ADP. Sample weights in the trees: everyone 1×; ADP ≤150 gets 4×; ≤72 gets 5.5×; steal band 18–132 gets another ×1.2. The model is trained to care about draftable names, not UDFA dart throws.</p>
+
+<h2>6. Features a yardage prop cannot see</h2>
+<p>These feed the prior and/or the trees. Trees see ~100 columns plus position_code and tenure_code. Team-context columns are <em>pre-shrunk</em> so O-line/SOS cannot dominate usage: ×0.35 for OL/scheme/pace, ×0.40 for SOS / indoor / implied totals.</p>
+
+<h3>6.1 Age</h3>
+<p>Age = days from birth to Sept 1 of season t / 365.25. Peaks: QB 30, RB 26.5, WR 28, TE 28.5.</p>
+<pre>α_age = clip( 1 − λ_pos · [age − peak]₊² ,  0.35,  1.05 )</pre>
+<p>λ is fit on players already past the peak with last-year PPR &gt; 50. Defaults if thin: QB 0.012, RB 0.035, WR 0.018, TE 0.016. RBs fall off harder because the data said so.</p>
+
+<h3>6.2 Tenure buckets (prior mix only)</h3>
+<table>
+<tr><th>years_exp</th><th>Bucket</th><th>Market</th><th>Production</th><th>Situation</th><th>Physical</th><th>Aging</th></tr>
+<tr><td>0</td><td>rookie</td><td class="n">0.22</td><td class="n">0.08</td><td class="n">0.40</td><td class="n">0.30</td><td class="n">0.00</td></tr>
+<tr><td>1</td><td>sophomore</td><td class="n">0.22</td><td class="n">0.32</td><td class="n">0.32</td><td class="n">0.12</td><td class="n">0.02</td></tr>
+<tr><td>2–3</td><td>developing</td><td class="n">0.28</td><td class="n">0.38</td><td class="n">0.24</td><td class="n">0.06</td><td class="n">0.04</td></tr>
+<tr><td>4–6</td><td>prime</td><td class="n">0.40</td><td class="n">0.34</td><td class="n">0.16</td><td class="n">0.04</td><td class="n">0.06</td></tr>
+<tr><td>≥7</td><td>veteran</td><td class="n">0.38</td><td class="n">0.24</td><td class="n">0.10</td><td class="n">0.02</td><td class="n">0.26</td></tr>
+</table>
+<p>Rookies lean on situation + athleticism. Prime vets lean on the market + last year. Aging vets get a heavier age penalty. Trees still see raw years_exp.</p>
+<pre>blend = w_m·m + w_p·prod + w_s·sit + w_ph·phys + w_a·(α_age · prod)
+prod  = PPR_eff · α_age · (0.85 + 0.15 · availability)
+PPR_eff = (PPR/G)·G_season  if missed weeks ≥ 3, else last year’s PPR</pre>
+<p>No market → zero w_m and renormalize. Situation multipliers (on top of OL / vacated / SOS / depth): cliff ×0.90, breakout ×1.06, team change ×0.97, role expand ×1.04, chronic injury ×0.96. Injury-bounce is still a tree feature; it is <em>not</em> a situation multiplier or a steal confirmer (it was anti-predictive).</p>
+
+<h3>6.3 Depth and vacated usage</h3>
+<p>Depth snapshot: historical week-1 REG (or last snapshot before Sept 8); 2026 = latest chart. Rank 1/2/3 weights 0.52 / 0.28 / 0.13. Vacated team share is split onto <em>people</em> by prior share + depth (rookies depth-only). <code>player_vacated_boost</code> = leftover targets for WR/TE, leftover carries for RB.</p>
+
+<h3>6.4 Red zone and TD luck (this is the fade “TD luck (over)”)</h3>
+<p>From PBP, dropping kneels, spikes, penalties, 2-pt. Inside-5 carry: yardline_100 ≤ 5. Inside-10 target: ≤ 10. End-zone target: air_yards ≥ yardline_100 − 0.5 and yardline_100 ≤ 20.</p>
+<pre>HV-RZ = 1.4·carries_in5 + 1.0·targets_in10 + 1.6·ez_targets
+rec_TD_luck  = rec TDs  − (0.20·targets_in10 + 0.28·ez_targets)
+rush_TD_luck = rush TDs −  0.42·carries_in5
+td_luck      = rec_TD_luck + rush_TD_luck</pre>
+<p>Positive = scored more TDs than the role implied (binge). Negative = under-scored relative to looks. Fade confirmer: <code>td_luck ≥ 2.0</code>. Steal confirmer: <code>td_luck ≤ −1</code>. TD luck alone never paints a name; it only confirms a gap that is already ≥5 ranks and ≥12 PPR.</p>
+
+<h3>6.5 Other on/off flags (computed even if unused as steal/fade)</h3>
+<table>
+<tr><th>Flag</th><th>Definition</th><th>Steal/fade?</th></tr>
+<tr><td>workload_cliff</td><td>(carries ≥ 240 and age ≥ 26.5) or (carries ≥ 280 and age ≥ 26)</td><td>Fade confirmer</td></tr>
+<tr><td>chronic_injury</td><td>≥ 8 missed-week flags in a 3-year rollup</td><td>Fade confirmer</td></tr>
+<tr><td>overproduction</td><td>z(PPG) − 0.5·(z(snap)+z(target share)); ≥ 0.55</td><td>Fade confirmer</td></tr>
+<tr><td>eff_index</td><td>sum of within-pos z of YPC, YPR, catch rate; ≥ 1.4</td><td>Fade confirmer</td></tr>
+<tr><td>role_expand</td><td>listed starter, snap &lt; 55%, years_exp ≥ 1</td><td>Steal confirmer</td></tr>
+<tr><td>sophomore_leap</td><td>years_exp = 1 and last PPR in [70, 200]</td><td>Steal confirmer</td></tr>
+<tr><td>pass_catch_rb</td><td>RB target share ≥ 0.08</td><td>Steal confirmer</td></tr>
+<tr><td>new_starter_vacated</td><td>new starter × vacated boost ≥ 6</td><td>Steal confirmer</td></tr>
+<tr><td>injury_bounce</td><td>games_pct &lt; 0.70, age 23–31, last PPR/G ≥ 8</td><td>Tree only (stripped from flags; anti-predictive)</td></tr>
+<tr><td>breakout_window</td><td>RB yr 1 / WR 1–2 / TE 2–3</td><td>Tree + situation ×1.06; not a steal confirmer</td></tr>
+</table>
+
+<h3>6.6 Physical prior (young players)</h3>
+<pre>speed_score = wt · 200 / forty⁴
+burst       = vertical + broad_jump/12
+draft_cap   = max(0.15, 1.15 − log(pick)/log(250))</pre>
+<p>Years_exp &lt; 3: pos_base · draft_cap · athletic (QB 220, RB 160, WR 140, TE 110). Veterans fall back to last year’s PPR for the physical slot.</p>
+
+<h3>6.7 Added in the Aug 2026 enhancement pass</h3>
+<ul>
+<li><strong>H2 deltas:</strong> week ≥10 minus weeks 1–9 mean carries and PPR (lagged). Target-share H2 delta was ~0 leftover signal — skipped.</li>
+<li><strong>NGS:</strong> intended air yards (QB), RYOE/att (RB), air-share (WR). Separation was ~0 — skipped.</li>
+<li><strong>QB change:</strong> primary passer (PBP attempts; 2026 from depth QB1). <code>wr_new_qb</code> for WR/TE; <code>new_starter_qb</code> if this player is the new QB1. Head-coach change <code>new_hc</code> is kept in the trees.</li>
+<li><strong>ECR vs FFC ADP.</strong></li>
+<li><strong>new_oc:</strong> Wikipedia OC names; PFR blocked. Partial history; 2026 current list is almost complete.</li>
+</ul>
+<p>Luck z-score pieces (<code>rec_td_luck</code>, <code>rush_td_luck</code>, YPC/YPR/catch z) were dropped from the tree list; <code>td_luck</code>, <code>overproduction</code>, <code>eff_index</code> remain.</p>
+
+<h2>7. How the trees are actually weighted</h2>
+<p>Four HistGradientBoosting regressors, sklearn, random_state=7:</p>
+<table>
+<tr><th>Tree</th><th>Target</th><th>Depth / iter / leaf</th></tr>
+<tr><td>points</td><td>actual PPR</td><td>depth 3, 280 iter, min leaf 22, lr 0.05, L2 0.55</td></tr>
+<tr><td>global residual</td><td>actual − market_fp</td><td>same, 220 iter; output clipped ±60</td></tr>
+<tr><td>position residual</td><td>same, per pos if n≥120</td><td>180 iter, leaf 18; mixed 55% local + 45% global</td></tr>
+<tr><td>rank lift</td><td>ADP pos rank − actual pos rank</td><td>depth 2, 200 iter; clipped ±18</td></tr>
+</table>
+<p><strong>Final mix when a market exists:</strong></p>
+<pre>ŷ = base + λ_tenure · residual + clip(k · lift, −22, 22)
+λ_tenure = λ·1.15 rookies,  ·1.05 years 1–2,  ·0.85 years ≥7,  else λ
+base = VFP if vfp_markets≥1 else ADP-implied points (else blend, else last PPR, else 80)</pre>
+<p><strong>No market:</strong> 0.6·points_tree + 0.4·blend.</p>
+<p><strong>Rookie gravity toward prior:</strong> extra 40% / 18% / 5% blend for years 0 / 1 / ≥2, but if they have a real VFP that extra is capped at 8% (don’t drag a posted rookie 40% off the books toward a combine prior).</p>
+<p><strong>λ and k are not hand-set.</strong> Grid λ ∈ {0.25, 0.40, 0.55, 0.75, 1.00}, k ∈ {0, 1.5}. Fit trees on seasons before the last training year; pick the pair that maximizes Spearman on ADP-drafted players in that last year. <em>Maximize ρ, not steal count.</em> Last 2026 fit used k=0 (rank-lift tree off). λ in backtests ranged 0.25 (2021) to 1.0 (2024).</p>
+<p><strong>Casual angle:</strong> turning the residual up until more names go green is how you lose to ADP. 2024’s tuner chose λ=1.0 and still only tied ADP. The usable edge is disagreement, not “trust the trees more.”</p>
+
+<h2>8. Steal / fade (the green and red pills)</h2>
+<p>Computed on <em>positional</em> ranks among ADP-drafted players, not overall VORP pick. Hover “i” lists up to three confirming phrases.</p>
+<p><strong>Steal</strong> if all of:</p>
+<ol>
+<li>ADP ∈ [18, 132] (skip 1.01s and dart throws)</li>
+<li>model position rank ≤ ADP position rank − 5</li>
+<li>ŷ − m ≥ 12 PPR</li>
+<li>at least one of: role expand, sophomore leap, pass_catch_rb ≥ 0.08, td_luck ≤ −1, new_starter_vacated ≥ 6</li>
+</ol>
+<p><strong>Fade</strong> if (2)–(3) flip sign and at least one of: workload cliff, chronic injury, td_luck ≥ 2.0, overproduction ≥ 0.55, eff_index ≥ 1.4.</p>
+<p><strong>Early-round fades</strong> (ADP &lt; 18): need fade_why and either ≥10 PPR below m, or a workload cliff with edge ≤ +5. You do not fade a 1.01 because a tree twitched.</p>
+<p>Walk-forward flag hit (stricter ≥4 actual rank gain metric in code): 10 steals, 60% hit, mean +9.5 ranks; 47 fades, 70% hit. Re-ranking inside the ADP pool, steal flags were closer to 80% beating ADP rank. Either way: small n on steals; the bigger published edge is <em>any</em> ≥5-rank cheap call, not only painted names.</p>
+<p>Cheap-call (not flag) walk-forward, ADP pool: ≥5 ranks cheaper beat ADP rank <strong>76%</strong> (68–93% every year). ≥8 cheaper: <strong>81%</strong>, mean +12.5 ranks. Mid-round ADP 36–96: historically model-cheap names scored more actual PPR than model-expensive names at the same cost (old figure ~177 vs 154).</p>
+
+<h2>9. How the hosted big board is ordered</h2>
+<p>This is the thing that broke when QBs flooded round 1.</p>
+<ul>
+<li><strong>Positional tabs:</strong> sort by projected PPR (or rest-of-season PPR in season). QB1 = most points at QB. Correct.</li>
+<li><strong>Full board:</strong> sort by <strong>VORP</strong> = ŷ − replacement starter in a 12-team 1QB league. Roster is <strong>2 RB, 2 WR, 1 FLEX</strong> (plus 1 QB, 1 TE). Replacement ranks: <strong>QB12, RB30, WR30, TE12</strong> (12 flex spots split evenly: 24 starters + 6 flex at each of RB and WR). Same-position VORP order = points order. Across positions, elite RBs jump QBs because QB12 still scores ~270 PPR and RB30 does not. (An earlier 3-WR / WR36 version overstated how many WRs you have to start.)</li>
+<li><strong>vs ADP on the full board:</strong> overall ADP rank − overall pick (CMC pick 2 vs ADP ~7 → +5). On positional tabs: ADP position rank − model position rank (CMC RB2 vs ADP RB3 → +1).</li>
+<li><strong>Steal/fade pills</strong> still use the positional ±5 / ±12 rule + confirmer, not the overall vs number. Josh Allen can be +20 overall vs ADP and still be “fair” if he is QB1 vs ADP QB1.</li>
+</ul>
+<p>Round headers: pick 1–12 = round 1, etc. 12-team snake. Early/mid/late within a round is picks 1–4 / 5–8 / 9–12 of that round.</p>
+
+<h2>10. Live overlay (does not retrain)</h2>
+<pre>ros_fp = model_fp
+       × (games left / scheduled)
+       × (1 + 0.08 · SOS_remaining) / (1 + 0.08 · SOS_full)
+       × indoor remaining/full for WR/QB</pre>
+<p>SOS is last year’s opponent defensive EPA on this year’s leftover opponents. After ~6 weeks of league games, blend in current-year YTD defense. Live team prefers Sleeper. Designations: IR / PUP / Q / O / D / SUS. Steal/fade labels stay frozen when names move. Daily Action: cron 0 14 * * * runs <code>refresh_board.py</code> and commits <code>docs/index.html</code> if it changed.</p>
+<p>Toggles on the page: Full/Half PPR, Full/Positional, Start/Exit Draft (browser localStorage only). There is no separate midseason mode.</p>
+
+<h2>11. Walk-forward snapshot (last rebuild)</h2>
+<table>
+<tr><th>Year</th><th>n ADP</th><th>λ</th><th>k</th><th>Model ρ</th><th>ADP ρ</th><th>Δ</th><th>MAE PPR</th></tr>
+<tr><td>2021</td><td class="n">172</td><td class="n">0.25</td><td class="n">0</td><td class="n">0.608</td><td class="n">0.613</td><td class="n">−0.005</td><td class="n">56.6</td></tr>
+<tr><td>2022</td><td class="n">142</td><td class="n">0.40</td><td class="n">0</td><td class="n">0.604</td><td class="n">0.581</td><td class="n">+0.023</td><td class="n">53.3</td></tr>
+<tr><td>2023</td><td class="n">172</td><td class="n">0.75</td><td class="n">0</td><td class="n">0.586</td><td class="n">0.537</td><td class="n">+0.049</td><td class="n">57.1</td></tr>
+<tr><td>2024</td><td class="n">175</td><td class="n">1.00</td><td class="n">0</td><td class="n">0.579</td><td class="n">0.578</td><td class="n">+0.001</td><td class="n">59.8</td></tr>
+<tr><td>2025</td><td class="n">200</td><td class="n">0.40</td><td class="n">0</td><td class="n">0.628</td><td class="n">0.603</td><td class="n">+0.026</td><td class="n">54.7</td></tr>
+</table>
+<p>Mean Spearman lift vs ADP ≈ <strong>+0.019</strong>. MAE 53–60 PPR is not a bug. Fair comparison is ADP-drafted players only.</p>
+<p>Figures already generated (you can grab later): <code>docs/figures/01</code>–<code>10</code> and copies in <code>wordpress_figures/</code>. Spearman, rank vs actual, lift heatmap, points vs actual, rank lift, flag hit rates, disagreement calibration, mid-round same cost, top-5 roster edge, cheap calls by year.</p>
+
+<h2>12. Example you already asked about (CMC vs Bijan)</h2>
+<p>Overall pick is VORP; both RBs share the same replacement line, so this is just 292 vs 286 PPR (~6 points). Vegas and ADP have Bijan first (VFP 308 vs 287; ADP 1.7 vs 6.5). The prior/blend also has Bijan higher (342 vs 321). The residual trees flip them because CMC’s 417 PPR / 311 carries / 102 catches last year outweigh age-30 + workload cliff enough to land near his VFP, while Bijan is faded vs a 308 book / 1.01 ADP after td_luck 5.7 and eff_index 2.6. Neither is a steal/fade. Safe casual line: “six points, coin flip, the model is a little more scared of paying 1.01 for a TD binge than of a 30-year-old who just put up 417.”</p>
+
+<h2>13. Suggested article bones (you write the voice)</h2>
+<ol>
+<li>What the board is / isn’t (ranking vs ADP, not a betting sheet).</li>
+<li>The headline is disagreement, not “we beat ADP by 0.019 Spearman.”</li>
+<li>Vegas does volume; we do aging, vacated <em>people</em>, TD luck vs role, cliffs.</li>
+<li>How a name turns green/red (the three gates + one football reason). Mention TD luck as leftover vs red-zone role, threshold 2.0 for fades.</li>
+<li>Why the first round is RBs/WRs (VORP / 2 RB, 2 WR, 1 FLEX — replacement QB still scores a ton).</li>
+<li>Walk-forward: cheap calls hit most years; 2021/2024 were basically ties on full-board Spearman.</li>
+<li>Half PPR is a tax, live injuries move the same table, not a new model.</li>
+</ol>
+
+<h2>14. File map if you need to check a fact</h2>
+<table>
+<tr><th>Path</th><th>What</th></tr>
+<tr><td><code>src/ffmodel/config.py</code></td><td>scoring, peaks, tenure weights, steal thresholds, VORP replacement ranks</td></tr>
+<tr><td><code>src/ffmodel/features/assemble.py</code></td><td>panel join (depth, H2, NGS, ECR, QB, OC)</td></tr>
+<tr><td><code>src/ffmodel/features/context.py</code></td><td>VFP, age, vacated, situation, blend, TD luck, shrink</td></tr>
+<tr><td><code>src/ffmodel/features/edges.py</code></td><td>depth snapshot, H2, NGS, QB, ECR, Wikipedia OC</td></tr>
+<tr><td><code>src/ffmodel/features/remaining.py</code></td><td>ros_fp overlay</td></tr>
+<tr><td><code>src/ffmodel/model.py</code></td><td>trees, λ/k, steal/fade, VORP attach</td></tr>
+<tr><td><code>src/ffmodel/publish.py</code></td><td>board sort, vs ADP, hover why, HTML</td></tr>
+<tr><td><code>src/ffmodel/ingest/nflverse.py</code></td><td>download paths</td></tr>
+<tr><td><code>src/ffmodel/ingest/markets.py</code></td><td>FFC ADP, props CSV</td></tr>
+<tr><td><code>src/ffmodel/ingest/live_status.py</code></td><td>Sleeper / nflverse badges</td></tr>
+<tr><td><code>data/processed/rankings_2026.csv</code></td><td>current ŷ (gitignored)</td></tr>
+<tr><td><code>data/processed/backtest_by_season.csv</code></td><td>walk-forward table</td></tr>
+</table>
+
+<h2>15. Full tree feature list (FEATURE_COLS)</h2>
+<p>Trees see whatever of these exist on the panel, plus encoded <code>position_code</code> and <code>tenure_code</code>. “Lag” means last season.</p>
+<p class="muted">years_exp, age, age_alpha, games_lag, games_pct_lag, availability, ppr_lag, ppr_ppg_lag, attempts_lag, passing_yards_lag, passing_tds_lag, passing_epa_lag, passing_cpoe_lag, pacr_lag, carries_lag, rushing_yards_lag, rushing_tds_lag, rushing_epa_lag, rushing_20_lag, targets_lag, receptions_lag, receiving_yards_lag, receiving_tds_lag, receiving_epa_lag, target_share_lag, air_yards_share_lag, wopr_lag, receiving_20_lag, receiving_40_lag, explosive_rate, chunk_rating, chunk_index, hv_rz, hv_rz_per_touch, rz_index, inside5_carries, inside10_targets, ez_targets, player_vacated_targets, player_vacated_carries, player_vacated_boost, td_luck, catch_rate_lag, ypc_lag, ypr_lag, carry_load, carry_share_lag, pass_catch_rb, qb_rush_share, workload_cliff, breakout_window, sophomore_leap, team_change, new_hc_pass_catcher, pos_competition, starter, role_expand, injury_bounce, chronic_injury, overproduction, eff_index, young_capital, new_starter_vacated, usage_index, draft_capital, off_snap_pct, forty, speed_score, burst, bmi, draft_pick_num, log_draft_pick, undrafted, depth_rank, production_proxy, situation_proxy, physical_proxy, blend_proj, oline_index_shrunk, coaching_C_shrunk, proe_shrunk, pace_neutral_shrunk, sos_def_pass_epa_shrunk, sos_def_rush_epa_shrunk, sos_def_rec_epa_shrunk, pct_indoor_shrunk, avg_total_shrunk, avg_spread_for_shrunk, new_hc, carries_h2_delta, ppr_h2_delta, ngs_intended_air_yards, ngs_ryoe_att, ngs_air_share, qb_change, wr_new_qb, new_starter_qb, ecr, ecr_minus_adp, new_oc.</p>
+<p><strong>Not in the trees:</strong> rec_td_luck, rush_td_luck, eff_ypc_z, eff_ypr_z, eff_catch_z (dropped as redundant with td_luck / overproduction / eff_index). ADP and VFP are the market <em>m</em>, not tree columns (except via blend_proj / ecr).</p>
+
+<p class="muted">Sources in one line for a footer: nflverse (CC BY 4.0); Fantasy Football Calculator ADP; publicly posted season-long totals; FantasyPros ECR via DynastyProcess; Wikipedia OC names. Not betting advice.</p>
+
+</body>
+</html>
