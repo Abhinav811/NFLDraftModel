@@ -10,6 +10,7 @@ from ..config import (
     PPR,
     PREDICT_SEASON,
     SKILL_POSITIONS,
+    TD_RATES,
     TENURE_WEIGHTS,
 )
 from ..names import normalize_name
@@ -567,8 +568,8 @@ def enrich_derived_features(panel: pd.DataFrame) -> pd.DataFrame:
     df["catch_rate_lag"] = np.where(tgt > 0, rec / tgt, np.nan)
     df["ypr_lag"] = np.where(rec > 0, rec_yd / rec, np.nan)
     df["ypc_lag"] = np.where(car > 0, rush_yd / car, np.nan)
-    df["rec_td_luck"] = rec_td.fillna(0) - (0.20 * in10 + 0.28 * ez)
-    df["rush_td_luck"] = rush_td.fillna(0) - 0.42 * in5
+    df["rec_td_luck"] = rec_td.fillna(0) - (TD_RATES["inside10_targets"] * in10 + TD_RATES["ez_targets"] * ez)
+    df["rush_td_luck"] = rush_td.fillna(0) - TD_RATES["inside5_carries"] * in5
     df["td_luck"] = df["rec_td_luck"] + df["rush_td_luck"]
     df["carry_load"] = car
     age = pd.to_numeric(df.get("age"), errors="coerce")

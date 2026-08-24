@@ -2,7 +2,7 @@
 
 *{{DATE}} · 12-team · Full PPR primary · trained on {{TRAIN_START}}–{{TRAIN_END}}*
 
-**[Open the {{SEASON}} board](https://abhinav811.github.io/NFLDraftModel/)** (new tab). Toggle Full PPR / Half PPR, switch Full board vs Positional, Start Draft to cross names off.
+**[Open the {{SEASON}} board](https://abhinav811.github.io/NFLDraftModel/)** (new tab). Toggle Full PPR / Half PPR, switch Full board vs Positional, Start Draft to cross names off and track your own roster.
 
 This guide is how the board is built. Rankings live on that page — including steal and fade flags — not here.
 

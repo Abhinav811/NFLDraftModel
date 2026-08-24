@@ -44,6 +44,9 @@ AGE_LAMBDA_DEFAULT = {"QB": 0.012, "RB": 0.035, "WR": 0.018, "TE": 0.016}
 # High-value red-zone weights.
 RZ_WEIGHTS = {"inside5_carries": 1.4, "inside10_targets": 1.0, "ez_targets": 1.6}
 
+# Historical TD conversion per high-value red-zone opportunity. Drives td_luck.
+TD_RATES = {"inside5_carries": 0.42, "inside10_targets": 0.20, "ez_targets": 0.28}
+
 # 12-team, full-PPR draft windows.
 ROUND_SIZE = 12
 # Last startable skill slot for VORP on the overall board (1QB, 2RB, 2WR, 1TE, 1 FLEX).
