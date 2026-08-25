@@ -255,7 +255,10 @@ def fig_flags(preds: pd.DataFrame, steal: dict) -> None:
         ax.text(bar.get_x() + bar.get_width() / 2, v + 0.03, f"{v:.0%}", ha="center", fontsize=14, fontweight="600")
     ax.legend(frameon=False)
     _caption(ax, "Published steal / fade flags, 2021–2025")
-    fig.text(0.01, -0.04, "Ranks among drafted players only. 78% of steal flags finished above their ADP rank.", fontsize=8, color=MUTED)
+    fig.text(0.01, -0.04,
+             f"Ranks among drafted players only. {steal_hit:.0%} of steal flags finished above their ADP rank "
+             f"(n={len(steal_g)}, so treat the exact number loosely).",
+             fontsize=8, color=MUTED)
     _save(fig, "06_flag_hit_rates.png")
     _ = steal
 
@@ -388,6 +391,248 @@ def fig_cheap_by_year(preds: pd.DataFrame) -> None:
     _save(fig, "10_cheap_calls_by_year.png")
 
 
+def load_panel() -> pd.DataFrame:
+    """Player-seasons with a real prior role, plus what happened the next year.
+
+    A row's td_luck is computed from the *previous* season, so the outcome that
+    tests it is this row's season. Next-season TD totals only exist as the lag
+    columns on the following row, hence the self-join.
+    """
+    p = pd.read_parquet(PROCESSED_DIR / "player_panel.parquet")
+    p = p.loc[p["position"].isin(["QB", "RB", "WR", "TE"])].copy()
+    p["tds_prior"] = p["rushing_tds_lag"].fillna(0) + p["receiving_tds_lag"].fillna(0)
+    nxt = p[["player_id", "season", "tds_prior"]].rename(columns={"season": "s1", "tds_prior": "tds_next"})
+    nxt["season"] = nxt["s1"] - 1
+    d = p.merge(nxt[["player_id", "season", "tds_next"]], on=["player_id", "season"], how="inner")
+    d["d_td"] = d["tds_next"] - d["tds_prior"]
+    d["d_ppr"] = d["ppr_actual"] - d["ppr_lag"]
+    return d.loc[d["td_luck"].notna() & (d["tds_prior"] >= 2) & (d["ppr_lag"] >= 60)].copy()
+
+
+LUCK_BINS = [-99, -1.5, 1.5, 3, 5, 7, 99]
+LUCK_LABELS = ["Unlucky\n(≤ −1.5)", "Neutral\n(−1.5 to 1.5)", "+1.5 to 3", "+3 to 5", "+5 to 7", "Extreme\n(≥ +7)"]
+
+
+def fig_td_luck_mechanism(panel: pd.DataFrame) -> None:
+    d = panel.copy()
+    d["bin"] = pd.cut(d["td_luck"], LUCK_BINS, labels=LUCK_LABELS)
+    g = d.groupby("bin", observed=True)
+    dtd, dppr, ns = g["d_td"].mean(), g["d_ppr"].mean(), g.size()
+    down = g["d_td"].apply(lambda s: (s < 0).mean())
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.8))
+    x = np.arange(len(dtd))
+    for ax, vals, ylab, title in [
+        (axes[0], dtd, "Change in TDs the next season", "Touchdowns come back down"),
+        (axes[1], dppr, "Change in PPR points the next season", "And the fantasy points follow"),
+    ]:
+        colors = [FADE if v < 0 else STEAL for v in vals]
+        bars = ax.bar(x, vals.to_numpy(), color=colors, width=0.7)
+        ax.axhline(0, color=INK, lw=0.8)
+        ax.set_xticks(x)
+        ax.set_xticklabels(LUCK_LABELS, fontsize=8)
+        ax.set_ylabel(ylab)
+        ax.spines[["top", "right"]].set_visible(False)
+        span = vals.max() - vals.min()
+        # Room under the lowest bar for its value label and the sample-size row.
+        ax.set_ylim(vals.min() - span * 0.30, max(vals.max() + span * 0.12, span * 0.06))
+        pad = span * 0.03
+        for bar, v in zip(bars, vals):
+            off = pad if v >= 0 else -pad
+            fmt = f"{v:+.1f}" if abs(v) < 10 else f"{v:+.0f}"
+            ax.text(bar.get_x() + bar.get_width() / 2, v + off, fmt, ha="center",
+                    va="bottom" if v >= 0 else "top", fontsize=10, fontweight="600")
+        _caption(ax, title)
+    lo = axes[0].get_ylim()[0]
+    for i, (n, pct) in enumerate(zip(ns, down)):
+        axes[0].text(i, lo + abs(lo) * 0.015, f"n={int(n)}\n{pct:.0%} down", ha="center", va="bottom",
+                     fontsize=7, color=MUTED)
+    fig.text(0.01, -0.04,
+             "TD luck = actual TDs minus what the red-zone role implies (0.42 per inside-5 carry, 0.28 per end-zone target, "
+             "0.20 per inside-10 target). 2019–2025, players with a real prior role.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "11_td_luck_mechanism.png")
+
+
+def fig_td_luck_by_year(panel: pd.DataFrame) -> None:
+    rows = []
+    for season, g in panel.groupby("season"):
+        hi = g.loc[g["td_luck"] >= g["td_luck"].quantile(0.9)]
+        rows.append({"season": int(season), "corr": g["td_luck"].corr(g["d_td"]),
+                     "hi_dtd": hi["d_td"].mean(), "n": len(hi)})
+    t = pd.DataFrame(rows).sort_values("season")
+
+    # A row's luck comes from the prior season, so label both ends of the test.
+    t["label"] = [f"{s-1}–{str(s)[2:]}" for s in t["season"]]
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.4), gridspec_kw={"width_ratios": [1.25, 1]})
+    ax = axes[0]
+    bars = ax.bar(t["label"], t["hi_dtd"], color=FADE, width=0.62)
+    ax.axhline(0, color=INK, lw=0.8)
+    ax.set_ylim(t["hi_dtd"].min() * 1.22, 0.35)
+    ax.set_ylabel("Mean TD change, luckiest 10%")
+    ax.tick_params(axis="x", labelsize=8.5)
+    ax.spines[["top", "right"]].set_visible(False)
+    for bar, v, n in zip(bars, t["hi_dtd"], t["n"]):
+        ax.text(bar.get_x() + bar.get_width() / 2, v - 0.12, f"{v:+.1f}", ha="center", va="top", fontsize=10, fontweight="600")
+        ax.text(bar.get_x() + bar.get_width() / 2, -0.1, f"n={int(n)}", ha="center", va="top", fontsize=7, color="#fff")
+    _caption(ax, "Every single season, the luckiest scorers gave TDs back")
+
+    ax2 = axes[1]
+    ax2.plot(t["label"], t["corr"], marker="o", color=ACCENT, lw=1.6)
+    ax2.axhline(0, color=INK, lw=0.8)
+    ax2.set_ylim(-0.62, 0.05)
+    ax2.set_ylabel("corr(TD luck, next-year TD change)")
+    ax2.tick_params(axis="x", labelsize=8.5, rotation=45)
+    ax2.spines[["top", "right"]].set_visible(False)
+    for s, v in zip(t["label"], t["corr"]):
+        ax2.text(s, v - 0.035, f"{v:.2f}", ha="center", va="top", fontsize=8, color=MUTED)
+    _caption(ax2, "Sign never flips")
+    fig.text(0.01, -0.08,
+             "Labels read luck season and the season that tested it. Seven straight years of the same effect is why the model trusts it. "
+             "The weakest year still ran −0.32.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "12_td_luck_by_year.png")
+
+
+def _stack_labels(values: list[float], gap: float) -> list[float]:
+    """Push callout labels apart so a tight cluster stays readable."""
+    out = list(values)
+    for i in range(1, len(out)):
+        if out[i - 1] - out[i] < gap:
+            out[i] = out[i - 1] - gap
+    return out
+
+
+def fig_td_luck_extremes(panel: pd.DataFrame, jt: dict | None) -> None:
+    d = panel
+    fig, ax = plt.subplots(figsize=(9.8, 5.8))
+    rest = d.loc[d["td_luck"] < 7]
+    tail = d.loc[d["td_luck"] >= 7]
+    ax.scatter(rest["td_luck"], rest["d_ppr"], s=13, color="#c4bba8", alpha=0.55, linewidths=0, label="Everyone else")
+    ax.scatter(tail["td_luck"], tail["d_ppr"], s=30, color=FADE, alpha=0.85, linewidths=0,
+               label=f"TD luck ≥ +7 (n={len(tail)})")
+    ax.axhline(0, color=INK, lw=0.8)
+    ax.set_xlabel("TD luck last season  (actual TDs − role-implied TDs)")
+    ax.set_ylabel("Change in PPR points the next season")
+    ax.spines[["top", "right"]].set_visible(False)
+
+    xmax = float(d["td_luck"].max())
+    ax.set_xlim(float(d["td_luck"].min()) - 0.6, xmax + 7.0)
+    ymin, ymax = ax.get_ylim()
+
+    mean_tail = tail["d_ppr"].mean()
+    ax.plot([7, xmax + 0.4], [mean_tail, mean_tail], color=FADE, ls="--", lw=1.1)
+    ax.text(0.012, 0.83, f"TD luck ≥ +7:  mean {mean_tail:+.0f} PPR (dashed),  "
+            f"{100*(tail['d_ppr']<0).mean():.0f}% declined",
+            transform=ax.transAxes, fontsize=8.5, color=FADE, fontweight="600")
+
+    sel = d.nlargest(9, "td_luck").sort_values("d_ppr", ascending=False)
+    label_x = xmax + 1.0
+    ys = _stack_labels(sel["d_ppr"].tolist(), gap=(ymax - ymin) * 0.062)
+    for r, y in zip(sel.itertuples(), ys):
+        luck_yr = int(r.season) - 1
+        ax.annotate(f"{r.player_name} {luck_yr}–{str(int(r.season))[2:]}   {r.d_ppr:+.0f}",
+                    xy=(r.td_luck, r.d_ppr), xytext=(label_x, y),
+                    textcoords="data", va="center", ha="left", fontsize=7.5, color=INK,
+                    arrowprops=dict(arrowstyle="-", color=LINE, lw=0.7, shrinkA=0, shrinkB=3))
+    if jt:
+        ax.axvline(jt["td_luck"], color=ACCENT, ls="--", lw=1.4)
+        ax.text(jt["td_luck"] - 0.25, ymin + (ymax - ymin) * 0.055,
+                f"Jonathan Taylor 2026\nTD luck {jt['td_luck']:+.1f}  ({jt['z']:.1f} SD)",
+                ha="right", va="bottom", fontsize=9, color=ACCENT, fontweight="600")
+    ax.legend(frameon=False, loc="upper left", fontsize=8.5)
+    _caption(ax, "The extreme tail is where TD luck actually bites")
+    fig.text(0.01, -0.03,
+             f"2019–2025; labels are the luck season and the season that tested it. Of the {len(tail)} seasons with TD luck ≥ +7, "
+             f"{100*(tail['d_td']<0).mean():.0f}% lost touchdowns the next year and {100*(tail['d_ppr']<0).mean():.0f}% lost fantasy points. "
+             "Not all of it is regression — McCaffrey's collapse was a torn achilles — which is why a fade needs a second reason to agree.",
+             fontsize=8, color=MUTED)
+    _save(fig, "13_td_luck_extremes.png")
+
+
+REASON_INTENT = {
+    "overproduction": ("Overproduction", -1),
+    "workload_cliff": ("Workload cliff", -1),
+    "td_luck": ("TD luck (over)", -1),
+    "eff_index": ("Efficiency spike", -1),
+    "sophomore_leap": ("Sophomore leap", +1),
+    "role_expand": ("Role expansion", +1),
+    "new_starter_vacated": ("New starter", +1),
+    "pass_catch_rb": ("Pass-catching RB", +1),
+}
+
+
+def fig_reason_evidence() -> None:
+    p = pd.read_parquet(PROCESSED_DIR / "player_panel.parquet")
+    d = p.loc[p["position"].isin(["QB", "RB", "WR", "TE"]) & p["ppr_actual"].notna()
+              & (p["ppr_lag"] >= 60) & p["adp"].notna()].copy()
+    d["adp_rank"] = d.groupby(["season", "position"])["adp"].rank(method="min")
+    d["act_rank"] = d.groupby(["season", "position"])["ppr_actual"].rank(ascending=False, method="min")
+    d["beat"] = (d["adp_rank"] - d["act_rank"]) > 0
+
+    rows = []
+    for feat, (label, intent) in REASON_INTENT.items():
+        if feat not in d.columns:
+            continue
+        col = d[feat]
+        if col.dropna().nunique() < 3:
+            hi, lo = d.loc[col > 0], d.loc[col <= 0]
+        else:
+            cut = col.quantile(0.8)
+            hi, lo = d.loc[col >= cut], d.loc[col < cut]
+        if len(hi) < 20:
+            continue
+        p_hi, p_lo = hi["beat"].mean(), lo["beat"].mean()
+        gap = p_hi - p_lo
+        se = np.sqrt(p_hi * (1 - p_hi) / len(hi) + p_lo * (1 - p_lo) / len(lo))
+        rows.append({"label": label, "gap": 100 * gap, "ci": 100 * 1.96 * se, "n": len(hi),
+                     "works": np.sign(gap) == intent and abs(gap) > 1.96 * se})
+    t = pd.DataFrame(rows).sort_values("gap")
+
+    fig, ax = plt.subplots(figsize=(9.4, 5.0))
+    colors = [(FADE if r.gap < 0 else STEAL) if r.works else "#c4bba8" for r in t.itertuples()]
+    ax.barh(t["label"], t["gap"], color=colors, height=0.6)
+    ax.errorbar(t["gap"], range(len(t)), xerr=t["ci"], fmt="none", ecolor=INK, elinewidth=1.0,
+                capsize=3, alpha=0.65)
+    ax.axvline(0, color=INK, lw=0.9)
+    ax.set_xlabel("Change in the odds of beating ADP  (percentage points, 95% CI)")
+    ax.spines[["top", "right"]].set_visible(False)
+    for i, r in enumerate(t.itertuples()):
+        edge = r.gap + (r.ci if r.gap >= 0 else -r.ci)
+        off = 1.6 if r.gap >= 0 else -1.6
+        ax.text(edge + off, i, f"{r.gap:+.0f}  (n={int(r.n)})", va="center",
+                ha="left" if r.gap >= 0 else "right", fontsize=8.5)
+    ax.set_xlim(t["gap"].min() - t["ci"].max() - 14, t["gap"].max() + t["ci"].max() + 14)
+    from matplotlib.lines import Line2D
+    ax.legend(handles=[
+        Line2D([0], [0], marker="s", color="none", markerfacecolor=FADE, markersize=9, label="Real fade signal"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor=STEAL, markersize=9, label="Real steal signal"),
+        Line2D([0], [0], marker="s", color="none", markerfacecolor="#c4bba8", markersize=9, label="Not distinguishable from zero"),
+    ], frameon=False, loc="lower right", fontsize=8.5)
+    _caption(ax, "Which steal / fade reasons actually earn their chip")
+    fig.text(0.01, -0.07,
+             "2019–2025 drafted players; each bar compares the flagged group against everyone else, one reason at a time. "
+             "Bars whose interval crosses zero are honest context, not evidence — on the board a reason only prints when the model "
+             "already disagrees with ADP, so the weak ones never fire on their own.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "14_reason_evidence.png")
+
+
+def jt_context() -> dict | None:
+    path = PROCESSED_DIR / "rankings_2026.csv"
+    if not path.exists():
+        return None
+    r = pd.read_csv(path)
+    row = r.loc[r["player_name"].str.contains("Jonathan Taylor", na=False)]
+    if row.empty:
+        return None
+    return {"td_luck": float(row["td_luck"].iloc[0]), "z": float(row["z_td_luck"].iloc[0])}
+
+
 def main() -> None:
     _style()
     preds, by_season, steal = load_or_backtest()
@@ -402,6 +647,13 @@ def main() -> None:
     fig_midround(preds)
     fig_top5(preds)
     fig_cheap_by_year(preds)
+
+    panel = load_panel()
+    print(f"Feature-forensics rows: {len(panel)}")
+    fig_td_luck_mechanism(panel)
+    fig_td_luck_by_year(panel)
+    fig_td_luck_extremes(panel, jt_context())
+    fig_reason_evidence()
     print(f"Copy these into WordPress from {COPY_DIR}")
 
 
