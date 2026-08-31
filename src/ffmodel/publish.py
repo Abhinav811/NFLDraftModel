@@ -16,14 +16,6 @@ from .names import normalize_name
 
 
 POS_LIMITS = {"QB": 20, "RB": 50, "WR": 50, "TE": 20}
-BOARD_NOTE_FULL = (
-    "Overall pick is 12-team draft value (points over a replacement starter: "
-    "QB12, RB30, WR30, TE12 — 2 RB, 2 WR, 1 FLEX split evenly), not raw PPR. That is why elite RBs go first and "
-    "QBs sit in the middle rounds. Positional rank stays on the name (QB5). "
-    "IR / PUP / Q / O tags are live. Current team and rest-of-season points "
-    "re-rank this same board as the season moves."
-)
-BOARD_NOTE_POS = "Each list is ranked within position. Switch to Full board to see overall pick / round."
 
 
 def _fmt(n, digits=1) -> str:
@@ -884,7 +876,6 @@ def _write_html(
     </section>
 
     <h2 id="rankings-title">Full board</h2>
-    <p class="note" id="board-note">{BOARD_NOTE_FULL}</p>
     <div id="full-wrap">
       <table id="table-full"><thead></thead><tbody></tbody></table>
     </div>
@@ -939,9 +930,6 @@ def _write_html(
       document.getElementById("full-wrap").hidden = next !== "full";
       document.getElementById("pos-wrap").hidden = next !== "pos";
       document.getElementById("rankings-title").textContent = next === "full" ? "Full board" : "Positional rankings";
-      document.getElementById("board-note").textContent = next === "full"
-        ? {json.dumps(BOARD_NOTE_FULL)}
-        : {json.dumps(BOARD_NOTE_POS)};
     }}
 
     function toggleDraft() {{

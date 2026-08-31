@@ -327,7 +327,6 @@
     </section>
 
     <h2 id="rankings-title">Full board</h2>
-    <p class="note" id="board-note">Overall pick is 12-team draft value (points over a replacement starter: QB12, RB30, WR30, TE12 — 2 RB, 2 WR, 1 FLEX split evenly), not raw PPR. That is why elite RBs go first and QBs sit in the middle rounds. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Current team and rest-of-season points re-rank this same board as the season moves.</p>
     <div id="full-wrap">
       <table id="table-full"><thead></thead><tbody></tbody></table>
     </div>
@@ -382,9 +381,6 @@
       document.getElementById("full-wrap").hidden = next !== "full";
       document.getElementById("pos-wrap").hidden = next !== "pos";
       document.getElementById("rankings-title").textContent = next === "full" ? "Full board" : "Positional rankings";
-      document.getElementById("board-note").textContent = next === "full"
-        ? "Overall pick is 12-team draft value (points over a replacement starter: QB12, RB30, WR30, TE12 \u2014 2 RB, 2 WR, 1 FLEX split evenly), not raw PPR. That is why elite RBs go first and QBs sit in the middle rounds. Positional rank stays on the name (QB5). IR / PUP / Q / O tags are live. Current team and rest-of-season points re-rank this same board as the season moves."
-        : "Each list is ranked within position. Switch to Full board to see overall pick / round.";
     }
 
     function toggleDraft() {
