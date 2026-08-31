@@ -633,6 +633,283 @@ def jt_context() -> dict | None:
     return {"td_luck": float(row["td_luck"].iloc[0]), "z": float(row["z_td_luck"].iloc[0])}
 
 
+AGE_PEAKS = {"QB": 30.0, "RB": 26.5, "WR": 28.0, "TE": 28.5}
+POS_COLORS = {"QB": "#5c574e", "RB": FADE, "WR": ACCENT, "TE": ADP}
+
+
+def _outcome_frame() -> pd.DataFrame:
+    p = pd.read_parquet(PROCESSED_DIR / "player_panel.parquet")
+    d = p.loc[p["position"].isin(["QB", "RB", "WR", "TE"]) & p["ppr_actual"].notna()
+              & (p["ppr_lag"] >= 60)].copy()
+    d["d_ppr"] = d["ppr_actual"] - d["ppr_lag"]
+    d["ret"] = d["ppr_actual"] / d["ppr_lag"]
+    drafted = d.loc[d["adp"].notna()].copy()
+    drafted["adp_rank"] = drafted.groupby(["season", "position"])["adp"].rank(method="min")
+    drafted["act_rank"] = drafted.groupby(["season", "position"])["ppr_actual"].rank(ascending=False, method="min")
+    drafted["beat"] = (drafted["adp_rank"] - drafted["act_rank"]) > 0
+    return d, drafted
+
+
+def fig_age_curves() -> None:
+    d, _ = _outcome_frame()
+    d = d.loc[d["ppr_lag"] >= 80].copy()
+    d["years_past"] = d.apply(lambda r: r["age"] - AGE_PEAKS.get(r["position"], 28), axis=1)
+    bins = [-99, 0, 1.5, 3, 5, 99]
+    labels = ["At / before\npeak", "0–1.5 yrs\npast", "1.5–3 yrs\npast", "3–5 yrs\npast", "5+ yrs\npast"]
+    d["bin"] = pd.cut(d["years_past"], bins, labels=labels)
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.6), gridspec_kw={"width_ratios": [1.35, 1]})
+    ax = axes[0]
+    x = np.arange(len(labels))
+    width = 0.2
+    for i, pos in enumerate(["RB", "WR", "TE", "QB"]):
+        g = d.loc[d["position"] == pos].groupby("bin", observed=True)["ret"].mean().reindex(labels)
+        ax.bar(x + (i - 1.5) * width, g.to_numpy(), width, color=POS_COLORS[pos], label=pos)
+    ax.axhline(1.0, color=INK, lw=0.8, ls="--")
+    ax.set_xticks(x)
+    ax.set_xticklabels(labels, fontsize=8)
+    ax.set_ylim(0.45, 1.15)
+    ax.set_ylabel("Next-season PPR ÷ last-season PPR")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, ncol=4, loc="upper right", fontsize=8.5)
+    _caption(ax, "After the peak, the points do not come back")
+
+    ax2 = axes[1]
+    # Fitted age_alpha at +0..+6 years for each position (defaults)
+    from ffmodel.config import AGE_LAMBDA_DEFAULT
+    years = np.linspace(0, 6, 50)
+    for pos in ["RB", "WR", "TE", "QB"]:
+        lam = AGE_LAMBDA_DEFAULT[pos]
+        alpha = np.clip(1 - lam * years ** 2, 0.35, 1.05)
+        ax2.plot(years, alpha, color=POS_COLORS[pos], lw=2, label=f"{pos} (λ={lam})")
+    ax2.set_xlabel("Years past positional peak")
+    ax2.set_ylabel("Age multiplier α")
+    ax2.set_ylim(0.35, 1.08)
+    ax2.spines[["top", "right"]].set_visible(False)
+    ax2.legend(frameon=False, fontsize=8)
+    _caption(ax2, "What the model actually applies")
+    peaks = ", ".join(f"{p} {v:g}" for p, v in AGE_PEAKS.items())
+    fig.text(0.01, -0.06,
+             f"Left: 2019–2025 players with ≥80 prior PPR, grouped by years past the fitted peak ({peaks}). "
+             "Right: the quadratic α the prior uses — RBs get the steepest curve because the history said so.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "15_age_curves.png")
+
+
+def fig_overproduction() -> None:
+    _, d = _outcome_frame()
+    d = d.loc[d["overproduction"].notna()].copy()
+    labels = ["Lowest 20%", "20–40%", "40–60%", "60–80%", "Highest 20%"]
+    d["bin"] = pd.qcut(d["overproduction"], [0, 0.2, 0.4, 0.6, 0.8, 1.0], labels=labels)
+    g = d.groupby("bin", observed=True)
+    beat, dppr, ns = g["beat"].mean(), g["d_ppr"].mean(), g.size()
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.5))
+    x = np.arange(len(labels))
+    for ax, vals, ylab, title, as_pct in [
+        (axes[0], beat, "Finished above ADP rank", "Beating ADP gets rarer", True),
+        (axes[1], dppr, "Change in PPR the next season", "And the points fall off", False),
+    ]:
+        colors = [FADE if (v < (0.5 if as_pct else 0)) else STEAL for v in vals]
+        bars = ax.bar(x, vals.to_numpy(), color=colors, width=0.7)
+        ax.axhline(0.5 if as_pct else 0, color=MUTED if as_pct else INK, ls="--" if as_pct else "-", lw=1)
+        ax.set_xticks(x)
+        ax.set_xticklabels(labels, fontsize=8.5)
+        ax.set_ylabel(ylab)
+        if as_pct:
+            ax.set_ylim(0, 0.85)
+        ax.spines[["top", "right"]].set_visible(False)
+        for bar, v, n in zip(bars, vals, ns):
+            txt = f"{v:.0%}" if as_pct else f"{v:+.0f}"
+            ax.text(bar.get_x() + bar.get_width() / 2, (v + 0.03) if as_pct else v + (4 if v >= 0 else -8),
+                    txt, ha="center", fontsize=11, fontweight="600")
+            if not as_pct:
+                ax.text(bar.get_x() + bar.get_width() / 2, ax.get_ylim()[0] * 0.92 if False else min(dppr.min() - 8, -5),
+                        f"n={int(n)}", ha="center", fontsize=7, color=MUTED)
+        _caption(ax, title)
+    for i, n in enumerate(ns):
+        axes[0].text(i, 0.04, f"n={int(n)}", ha="center", fontsize=7, color="#fff" if beat.iloc[i] > 0.35 else MUTED)
+    fig.text(0.01, -0.05,
+             "Overproduction = scoring z-score minus half of snap + target-share z-scores. Players in the top quintile "
+             "beat ADP only 28% of the time and lost ~39 PPR the next year. That is a fade confirmer, not a talent flag.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "16_overproduction.png")
+
+
+def fig_workload_cliff() -> None:
+    _, d = _outcome_frame()
+    rb = d.loc[d["position"] == "RB"].copy()
+    cliff = rb.loc[rb["workload_cliff"].fillna(0).astype(bool)]
+    rest = rb.loc[~rb["workload_cliff"].fillna(0).astype(bool)]
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.6), gridspec_kw={"width_ratios": [1, 1.25]})
+    ax = axes[0]
+    cats = [f"Workload cliff\n(n={len(cliff)})", f"Other drafted RBs\n(n={len(rest)})"]
+    vals = [cliff["beat"].mean(), rest["beat"].mean()]
+    bars = ax.bar(cats, vals, color=[FADE, "#c4bba8"], width=0.55)
+    ax.axhline(0.5, color=MUTED, ls="--", lw=1)
+    ax.set_ylim(0, 0.85)
+    ax.set_ylabel("Finished above ADP rank")
+    ax.spines[["top", "right"]].set_visible(False)
+    for bar, v in zip(bars, vals):
+        ax.text(bar.get_x() + bar.get_width() / 2, v + 0.03, f"{v:.0%}", ha="center", fontsize=14, fontweight="600")
+    _caption(ax, "Heavy, aging backs miss ADP more often")
+
+    ax2 = axes[1]
+    # Named cliff seasons with next-year outcomes
+    carry_col = "carries_lag" if "carries_lag" in cliff.columns else "carry_load"
+    cols = ["season", "player_name", "ppr_lag", "ppr_actual", "d_ppr", "age"]
+    if carry_col in cliff.columns:
+        cols.append(carry_col)
+    show = cliff.nlargest(min(10, len(cliff)), "ppr_lag")[cols]
+    y = np.arange(len(show))
+    ax2.barh(y, show["d_ppr"].to_numpy(), color=[FADE if v < 0 else STEAL for v in show["d_ppr"]], height=0.65)
+    ax2.axvline(0, color=INK, lw=0.8)
+    labels = []
+    for r in show.itertuples():
+        car = getattr(r, carry_col, None)
+        car_txt = f"{car:.0f} car, " if car is not None and pd.notna(car) else ""
+        labels.append(f"{r.player_name} {int(r.season)-1}  ({car_txt}age {r.age:.0f})")
+    ax2.set_yticks(y)
+    ax2.set_yticklabels(labels, fontsize=8)
+    ax2.set_xlabel("Change in PPR the next season")
+    ax2.spines[["top", "right"]].set_visible(False)
+    for yi, v in zip(y, show["d_ppr"]):
+        ax2.text(v + (4 if v >= 0 else -4), yi, f"{v:+.0f}", va="center",
+                 ha="left" if v >= 0 else "right", fontsize=8.5, fontweight="600")
+    _caption(ax2, "Biggest prior seasons that tripped the cliff")
+    fig.text(0.01, -0.05,
+             "Cliff = ≥240 carries at age ≥26.5, or ≥280 at age ≥26. Small sample (n=28 drafted), big miss rate: "
+             f"{cliff['beat'].mean():.0%} beat ADP vs {rest['beat'].mean():.0%} for everyone else, and the mean drop was "
+             f"{cliff['d_ppr'].mean():+.0f} PPR.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "17_workload_cliff.png")
+
+
+def fig_sophomore_leap() -> None:
+    _, d = _outcome_frame()
+    soph = d.loc[d["sophomore_leap"].fillna(0).astype(bool)]
+    rest = d.loc[~d["sophomore_leap"].fillna(0).astype(bool)]
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.6, 4.5))
+    ax = axes[0]
+    cats = [f"Sophomore leap\n(n={len(soph)})", f"Everyone else\n(n={len(rest)})"]
+    beat_v = [soph["beat"].mean(), rest["beat"].mean()]
+    bars = ax.bar(cats, beat_v, color=[STEAL, "#c4bba8"], width=0.55)
+    ax.axhline(0.5, color=MUTED, ls="--", lw=1)
+    ax.set_ylim(0, 0.85)
+    ax.set_ylabel("Finished above ADP rank")
+    ax.spines[["top", "right"]].set_visible(False)
+    for bar, v in zip(bars, beat_v):
+        ax.text(bar.get_x() + bar.get_width() / 2, v + 0.03, f"{v:.0%}", ha="center", fontsize=14, fontweight="600")
+    _caption(ax, "Year-two names in the window beat ADP")
+
+    ax2 = axes[1]
+    dpr = [soph["d_ppr"].mean(), rest["d_ppr"].mean()]
+    bars = ax2.bar(cats, dpr, color=[STEAL if dpr[0] > 0 else FADE, FADE], width=0.55)
+    ax2.axhline(0, color=INK, lw=0.8)
+    ax2.set_ylabel("Change in PPR the next season")
+    ax2.spines[["top", "right"]].set_visible(False)
+    for bar, v in zip(bars, dpr):
+        ax2.text(bar.get_x() + bar.get_width() / 2, v + (6 if v >= 0 else -10), f"{v:+.0f}",
+                 ha="center", fontsize=14, fontweight="600")
+    _caption(ax2, "They are also the group that still gains points")
+    fig.text(0.01, -0.05,
+             "Sophomore leap = year 2 with last-season PPR between 70 and 200. Not every second-year player — "
+             "just the ones who already produced enough to matter and still have room to grow. "
+             f"That band beat ADP {soph['beat'].mean():.0%} of the time and gained {soph['d_ppr'].mean():+.0f} PPR on average.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "18_sophomore_leap.png")
+
+
+def fig_tenure_weights() -> None:
+    from ffmodel.config import TENURE_WEIGHTS
+    order = ["rookie", "sophomore", "developing", "prime", "veteran"]
+    keys = ["market", "production", "situation", "physical", "aging"]
+    colors = {"market": ACCENT, "production": "#3d6b5a", "situation": ADP, "physical": "#8a9a7b", "aging": FADE}
+    key_idx = {"market": 0, "production": 1, "situation": 2, "physical": 3, "aging": 4}
+    mat = np.array([[TENURE_WEIGHTS[b][key_idx[k]] for k in keys] for b in order])
+
+    fig, ax = plt.subplots(figsize=(8.8, 4.4))
+    bottom = np.zeros(len(order))
+    x = np.arange(len(order))
+    for j, k in enumerate(keys):
+        ax.bar(x, mat[:, j], bottom=bottom, color=colors[k], width=0.62, label=k)
+        bottom += mat[:, j]
+    ax.set_xticks(x)
+    ax.set_xticklabels([b.title() for b in order])
+    ax.set_ylim(0, 1.05)
+    ax.set_ylabel("Share of the prior")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, ncol=5, loc="upper center", bbox_to_anchor=(0.5, 1.02), fontsize=8.5)
+    for i, row in enumerate(mat):
+        cum = 0.0
+        for v in row:
+            if v >= 0.10:
+                ax.text(i, cum + v / 2, f"{v:.0%}", ha="center", va="center", fontsize=8, color="#fff", fontweight="600")
+            cum += v
+    _caption(ax, "How the prior reweights as a player ages")
+    fig.text(0.01, -0.04,
+             "Rookies lean on situation and measurables. Prime vets lean on the market and last year’s production. "
+             "Veterans take a real aging tax. This is the shrinkage target before the trees — not the published ranking.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "19_tenure_weights.png")
+
+
+def fig_vorp_reorder() -> None:
+    path = PROCESSED_DIR / "rankings_2026.csv"
+    if not path.exists():
+        return
+    r = pd.read_csv(path)
+    r = r.loc[r["adp"].notna() & r["model_fp"].notna()].copy()
+    r["pts_rank"] = r["model_fp"].rank(ascending=False, method="min")
+    r["vorp_rank"] = r["vorp"].rank(ascending=False, method="min")
+    r["shift"] = r["pts_rank"] - r["vorp_rank"]  # + = moved up on VORP board
+
+    fig, axes = plt.subplots(1, 2, figsize=(9.8, 4.6))
+    ax = axes[0]
+    for pos in ["QB", "RB", "WR", "TE"]:
+        g = r.loc[r["position"] == pos]
+        ax.scatter(g["pts_rank"], g["vorp_rank"], s=18, alpha=0.65, linewidths=0,
+                   color=POS_COLORS[pos], label=pos)
+    lim = 80
+    ax.plot([1, lim], [1, lim], color=INK, lw=0.7, alpha=0.4)
+    ax.set_xlim(0.5, lim)
+    ax.set_ylim(lim, 0.5)
+    ax.set_xlabel("Rank by raw projected PPR")
+    ax.set_ylabel("Rank by VORP (published board)")
+    ax.spines[["top", "right"]].set_visible(False)
+    ax.legend(frameon=False, loc="lower left", fontsize=8.5)
+    _caption(ax, "Same projections, different pick order")
+
+    ax2 = axes[1]
+    # Mean shift by position among top-60 by points
+    top = r.loc[r["pts_rank"] <= 60]
+    means = top.groupby("position")["shift"].mean().reindex(["QB", "RB", "WR", "TE"])
+    colors = [FADE if v < 0 else STEAL for v in means]
+    ax2.barh(["QB", "RB", "WR", "TE"][::-1], means.reindex(["QB", "RB", "WR", "TE"][::-1]),
+             color=colors[::-1], height=0.55)
+    ax2.axvline(0, color=INK, lw=0.8)
+    ax2.set_xlabel("Mean ranks gained on the VORP board  (+ = drafted earlier)")
+    ax2.spines[["top", "right"]].set_visible(False)
+    for pos, v in means.items():
+        y = list(["QB", "RB", "WR", "TE"][::-1]).index(pos)
+        ax2.text(v + (1.2 if v >= 0 else -1.2), y, f"{v:+.1f}", va="center",
+                 ha="left" if v >= 0 else "right", fontsize=11, fontweight="600")
+    _caption(ax2, "QBs fall, RBs rise — on purpose")
+    fig.text(0.01, -0.05,
+             "2026 board. VORP = projected points minus a replacement starter (QB12, RB30, WR30, TE12 for a 2RB/2WR/1FLEX league). "
+             "Raw PPR puts elite QBs in the first round; draft value puts them where ADP already has them.",
+             fontsize=8, color=MUTED)
+    fig.tight_layout()
+    _save(fig, "20_vorp_reorder.png")
+
+
 def main() -> None:
     _style()
     preds, by_season, steal = load_or_backtest()
@@ -654,6 +931,12 @@ def main() -> None:
     fig_td_luck_by_year(panel)
     fig_td_luck_extremes(panel, jt_context())
     fig_reason_evidence()
+    fig_age_curves()
+    fig_overproduction()
+    fig_workload_cliff()
+    fig_sophomore_leap()
+    fig_tenure_weights()
+    fig_vorp_reorder()
     print(f"Copy these into WordPress from {COPY_DIR}")
 
 
